@@ -2,6 +2,7 @@ package com.deepseek.demo.service.tools;
 
 import com.deepseek.demo.annotation.ActionType;
 import com.deepseek.demo.annotation.Tool;
+import com.deepseek.demo.annotation.ToolDomain;
 import com.deepseek.demo.annotation.ToolParam;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -27,6 +28,8 @@ public class TaskTools {
      */
     @Tool(name = "query_task",
           description = "查询任务列表，可按负责人和状态筛选",
+          domain = ToolDomain.TASK_MANAGEMENT,
+          capabilities = {"task:read", "task:search"},
           parameters = {
               @ToolParam(name = "assignee", type = "string",
                          description = "负责人姓名", required = true),
@@ -52,6 +55,8 @@ public class TaskTools {
      */
     @Tool(name = "create_task",
           description = "创建新任务，需要指定任务标题",
+          domain = ToolDomain.TASK_MANAGEMENT,
+          capabilities = {"task:write"},
           parameters = {
               @ToolParam(name = "title", type = "string",
                          description = "任务标题", required = true),

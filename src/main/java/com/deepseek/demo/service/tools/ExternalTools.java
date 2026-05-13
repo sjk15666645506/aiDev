@@ -2,6 +2,7 @@ package com.deepseek.demo.service.tools;
 
 import com.deepseek.demo.annotation.ActionType;
 import com.deepseek.demo.annotation.Tool;
+import com.deepseek.demo.annotation.ToolDomain;
 import com.deepseek.demo.annotation.ToolParam;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -29,6 +30,8 @@ public class ExternalTools {
      */
     @Tool(name = "feishu_send_message",
           description = "通过 Webhook 发送飞书消息通知",
+          domain = ToolDomain.NOTIFICATION,
+          capabilities = {"notify:send"},
           parameters = {
               @ToolParam(name = "webhook_url", type = "string",
                          description = "飞书机器人 Webhook 地址", required = true),

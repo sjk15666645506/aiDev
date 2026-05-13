@@ -1,7 +1,6 @@
 package com.deepseek.demo.service;
 
 import com.deepseek.demo.annotation.ToolDomain;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -21,11 +20,9 @@ public class DomainRouter {
     private static final Logger log = LoggerFactory.getLogger(DomainRouter.class);
 
     private final DeepSeekService deepSeekService;
-    private final ObjectMapper objectMapper;
 
-    public DomainRouter(DeepSeekService deepSeekService, ObjectMapper objectMapper) {
+    public DomainRouter(DeepSeekService deepSeekService) {
         this.deepSeekService = deepSeekService;
-        this.objectMapper = objectMapper;
     }
 
     /**

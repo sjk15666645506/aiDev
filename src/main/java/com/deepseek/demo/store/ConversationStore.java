@@ -3,6 +3,7 @@ package com.deepseek.demo.store;
 import com.deepseek.demo.dto.Message;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.ArrayList;
@@ -19,6 +20,7 @@ import java.util.concurrent.TimeUnit;
  * 使用 ConcurrentHashMap 作为线程安全的存储后端，并附带定时清理过期会话的机制。
  * 每个会话包含消息列表、检查点、计划确认状态和最后访问时间。
  */
+@Component
 public class ConversationStore {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationStore.class);

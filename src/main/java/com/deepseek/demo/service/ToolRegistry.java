@@ -7,27 +7,16 @@ import com.deepseek.demo.dto.ToolCall;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.beans.factory.InitializingBean;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationContext;
 import org.springframework.context.ApplicationContextAware;
+import org.springframework.context.ApplicationListener;
+import org.springframework.context.event.ContextRefreshedEvent;
 import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Set;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.TimeoutException;
+import java.util.*;
+import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
 /**
@@ -38,7 +27,7 @@ import java.util.stream.Collectors;
  * 白名单校验以及工具执行能力。
  */
 @Component
-public class ToolRegistry implements InitializingBean, ApplicationContextAware {
+public class ToolRegistry implements ApplicationContextAware, ApplicationListener<ContextRefreshedEvent> {
 
     private static final Logger log = LoggerFactory.getLogger(ToolRegistry.class);
 
@@ -53,6 +42,9 @@ public class ToolRegistry implements InitializingBean, ApplicationContextAware {
 
     /** 已注册的工具映射：名称 -> ToolMeta */
     private final Map<String, ToolMeta> tools = new HashMap<>();
+
+    /** 是否已完成 @Tool 扫描（确保 ContextRefreshedEvent 只处理一次） */
+    private boolean scanned = false;
 
     /**
      * 构造 ToolRegistry
@@ -79,7 +71,11 @@ public class ToolRegistry implements InitializingBean, ApplicationContextAware {
     }
 
     @Override
-    public void afterPropertiesSet() {
+    public void onApplicationEvent(ContextRefreshedEvent event) {
+        // 确保只扫描一次
+        if (scanned) return;
+        scanned = true;
+
         log.info("开始扫描 @Tool 注解...");
         // 获取所有 Spring Bean 的名称
         String[] beanNames = applicationContext.getBeanDefinitionNames();

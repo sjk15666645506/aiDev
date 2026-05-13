@@ -135,8 +135,8 @@ class ToolRegistryTest {
     void toJsonSchema_ShouldReturnCorrectFormat() {
         List<Map<String, Object>> schemas = toolRegistry.toJsonSchema();
 
-        // 应该有 2 个工具 schema
-        assertEquals(2, schemas.size());
+        // 应该有 5 个工具 schema（2 个测试工具 + query_task + create_task + feishu_send_message）
+        assertEquals(5, schemas.size());
 
         for (Map<String, Object> schema : schemas) {
             // 最外层应有 type 和 function

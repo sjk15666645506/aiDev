@@ -3,6 +3,7 @@ package com.deepseek.demo.store;
 import com.deepseek.demo.dto.ToolCall;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
 import java.util.List;
@@ -20,6 +21,7 @@ import java.util.concurrent.TimeUnit;
  * plan 类型存储 LLM 提议的完整操作计划，exec 类型存储单个写工具调用及其参数。
  * 附带定时清理过期确认点的机制，防止内存泄漏。
  */
+@Component
 public class ConfirmationStore {
 
     private static final Logger log = LoggerFactory.getLogger(ConfirmationStore.class);

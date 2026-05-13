@@ -8,7 +8,7 @@ import org.springframework.boot.test.mock.mockito.MockBean;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class DomainRouterTest {
@@ -35,5 +35,60 @@ class DomainRouterTest {
 
         assertEquals(ToolDomain.SEARCH,
                 router.classify("任意消息"));
+        verify(deepSeekService).chatWithSystem(anyString(), anyString());
+    }
+
+    @Test
+    void shouldFallbackToSearchOnNullResponse() {
+        when(deepSeekService.chatWithSystem(anyString(), anyString()))
+                .thenReturn(null);
+
+        assertEquals(ToolDomain.SEARCH, router.classify("任意消息"));
+        verify(deepSeekService).chatWithSystem(anyString(), anyString());
+    }
+
+    @Test
+    void shouldFallbackToSearchOnBlankResponse() {
+        when(deepSeekService.chatWithSystem(anyString(), anyString()))
+                .thenReturn("   ");
+
+        assertEquals(ToolDomain.SEARCH, router.classify("任意消息"));
+        verify(deepSeekService).chatWithSystem(anyString(), anyString());
+    }
+
+    @Test
+    void shouldFallbackToSearchOnInvalidDomainResponse() {
+        when(deepSeekService.chatWithSystem(anyString(), anyString()))
+                .thenReturn("UNKNOWN_DOMAIN");
+
+        assertEquals(ToolDomain.SEARCH, router.classify("任意消息"));
+        verify(deepSeekService).chatWithSystem(anyString(), anyString());
+    }
+
+    @Test
+    void shouldClassifyCiCdQuery() {
+        when(deepSeekService.chatWithSystem(anyString(), anyString()))
+                .thenReturn("CI_CD");
+
+        assertEquals(ToolDomain.CI_CD,
+                router.classify("把最新代码部署到测试环境"));
+    }
+
+    @Test
+    void shouldClassifyCodeQuery() {
+        when(deepSeekService.chatWithSystem(anyString(), anyString()))
+                .thenReturn("CODE_REPOSITORY");
+
+        assertEquals(ToolDomain.CODE_REPOSITORY,
+                router.classify("查一下这个仓库的分支列表"));
+    }
+
+    @Test
+    void shouldClassifySearchOnUnknownQuery() {
+        when(deepSeekService.chatWithSystem(anyString(), anyString()))
+                .thenReturn("SEARCH");
+
+        assertEquals(ToolDomain.SEARCH,
+                router.classify("今天天气怎么样"));
     }
 }

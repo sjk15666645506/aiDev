@@ -167,8 +167,11 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
      * @param toolMetas 要转换的工具列表
      * @return JSON Schema 列表
      */
-    public List<Map<String, Object>> toJsonSchema(List<ToolMeta> toolMetas) {
-        List<Map<String, Object>> schemas = new ArrayList<>();
+     public List<Map<String, Object>> toJsonSchema(List<ToolMeta> toolMetas) {
+        if (toolMetas == null || toolMetas.isEmpty()) {
+            return Collections.emptyList();
+        }
+        List<Map<String, Object>> schemas = new ArrayList<>(toolMetas.size());
         for (ToolMeta meta : toolMetas) {
             schemas.add(buildJsonSchema(meta));
         }

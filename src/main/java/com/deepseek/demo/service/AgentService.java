@@ -4,6 +4,7 @@ import com.deepseek.demo.annotation.ActionType;
 import com.deepseek.demo.dto.*;
 import com.deepseek.demo.store.ConfirmationStore;
 import com.deepseek.demo.store.ConversationStore;
+import com.deepseek.demo.annotation.ToolDomain;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -39,6 +40,10 @@ public class AgentService {
     private final ConfirmationStore confirmationStore;
     private final VectorService vectorService;
     private final ObjectMapper objectMapper;
+    private final DomainRouter domainRouter;
+    private final ToolRetriever toolRetriever;
+    private final CapabilityGuard capabilityGuard;
+    private final FrequencyTracker frequencyTracker;
 
     /**
      * 构造 AgentService。
@@ -48,13 +53,21 @@ public class AgentService {
                         ConversationStore conversationStore,
                         ConfirmationStore confirmationStore,
                         VectorService vectorService,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper,
+                        DomainRouter domainRouter,
+                        ToolRetriever toolRetriever,
+                        CapabilityGuard capabilityGuard,
+                        FrequencyTracker frequencyTracker) {
         this.deepSeekService = deepSeekService;
         this.toolRegistry = toolRegistry;
         this.conversationStore = conversationStore;
         this.confirmationStore = confirmationStore;
         this.vectorService = vectorService;
         this.objectMapper = objectMapper;
+        this.domainRouter = domainRouter;
+        this.toolRetriever = toolRetriever;
+        this.capabilityGuard = capabilityGuard;
+        this.frequencyTracker = frequencyTracker;
     }
 
     /**
@@ -74,15 +87,29 @@ public class AgentService {
             // 1. 检索知识库
             String knowledgeContext = retrieveKnowledge(userMessage);
 
-            // 2. 获取或创建消息历史
+            // 2. Layer 1: 意图分类 → 确定领域
+            ToolDomain domain = domainRouter.classify(userMessage);
+            log.info("意图分类结果: domain={}", domain);
+
+            // 3. Layer 2: 工具召回 → 只携带相关工具
+            List<ToolMeta> selectedTools = toolRetriever.retrieve(userMessage, domain, 5);
+            log.info("工具召回结果: count={}, tools={}",
+                    selectedTools.size(),
+                    selectedTools.stream().map(ToolMeta::getName).collect(Collectors.toList()));
+
+            // 4. 获取或创建消息历史
             List<Message> messages = conversationStore.getMessages(conversationId);
             if (messages.isEmpty()) {
                 messages.add(new Message("system", buildSystemPrompt(knowledgeContext)));
                 messages.add(new Message("user", userMessage));
             }
 
-            // 3. 进入 ReAct 循环
-            return agentLoop(conversationId, messages);
+            // 5. 生成 filtered tool schemas 并保存到会话存储
+            List<Map<String, Object>> toolSchemas = toolRegistry.toJsonSchema(selectedTools);
+            conversationStore.setSelectedToolSchemas(conversationId, toolSchemas);
+
+            // 6. 进入 ReAct 循环（传入选定的工具 schemas）
+            return agentLoop(conversationId, messages, toolSchemas);
 
         } catch (Exception e) {
             log.error("Agent 对话异常", e);
@@ -163,14 +190,14 @@ public class AgentService {
                         "用户已确认操作计划。请严格按以下计划逐项执行，不得增删改操作。\n" +
                         "已批准的计划:\n" + formatPlan(cp.getPlanToolCalls())));
             }
-            return agentLoop(conversationId, messages);
+            return agentLoop(conversationId, messages, restoreToolSchemas(conversationId));
 
         } else if (feedback != null && !feedback.isEmpty()) {
             // 有反馈但未确认 → LLM 调整方案
             removeLastAssistantMessage(messages);
             messages.add(new Message("user",
                     "请根据以下意见调整方案: " + feedback));
-            return agentLoop(conversationId, messages);
+            return agentLoop(conversationId, messages, restoreToolSchemas(conversationId));
 
         } else {
             // 明确拒绝 → 终止
@@ -199,7 +226,7 @@ public class AgentService {
                 messages.add(new Message("user",
                         "请按以下调整后重新执行: " + feedback));
                 appendPendingHint(messages, cp.getPendingToolCalls());
-                return agentLoop(conversationId, messages);
+                return agentLoop(conversationId, messages, restoreToolSchemas(conversationId));
             }
             // 明确拒绝 → 终止
             conversationStore.clearCheckpoint(conversationId);
@@ -234,14 +261,14 @@ public class AgentService {
 
             // 提示剩余操作
             appendPendingHint(messages, cp.getPendingToolCalls());
-            return agentLoop(conversationId, messages);
+            return agentLoop(conversationId, messages, restoreToolSchemas(conversationId));
 
         } catch (Exception e) {
             log.error("工具执行失败: tool={}", cp.getToolName(), e);
             // 将异常信息以 tool role 返回，让 LLM 决定如何处理
             messages.add(new Message("tool",
                     "工具执行异常: " + e.getMessage(), cp.getToolCallId()));
-            return agentLoop(conversationId, messages);
+            return agentLoop(conversationId, messages, restoreToolSchemas(conversationId));
         }
     }
 
@@ -259,23 +286,41 @@ public class AgentService {
      * @param messages 当前消息列表
      * @return AgentResponse
      */
+    /** 保留原始签名，使用全量工具 schemas */
     private AgentResponse agentLoop(String conversationId, List<Message> messages) {
+        return agentLoop(conversationId, messages, restoreToolSchemas(conversationId));
+    }
+
+    /**
+     * ReAct 循环核心（携带工具 schemas）。
+     * <p>
+     * 循环调用 DeepSeek API（带 tools），根据返回结果决定下一步：
+     * <ul>
+     *   <li>无 tool_calls → 返回最终回答</li>
+     *   <li>有 tool_calls + 未确认计划 → 创建计划确认点</li>
+     *   <li>有 tool_calls + 已确认 → 逐个执行（含 CapabilityGuard 校验）</li>
+     * </ul>
+     *
+     * @param conversationId 会话 ID
+     * @param messages 当前消息列表
+     * @param toolSchemas 当前会话选中的工具 schemas
+     * @return AgentResponse
+     */
+    private AgentResponse agentLoop(String conversationId, List<Message> messages,
+                                     List<Map<String, Object>> toolSchemas) {
         boolean planConfirmed = conversationStore.getPlanConfirmed(conversationId);
 
         for (int i = 0; i < MAX_ITERATIONS; i++) {
-            // 保存 checkpoint
             conversationStore.saveCheckpoint(conversationId, messages, i);
 
-            // 调用 DeepSeek API（带 tools）
             DeepSeekChatResponse response;
             try {
-                response = deepSeekService.chatWithTools(messages, toolRegistry.toJsonSchema());
+                response = deepSeekService.chatWithTools(messages, toolSchemas);
             } catch (Exception e) {
                 log.error("DeepSeek API 调用失败(第{}轮)", i, e);
                 return AgentResponse.error("服务暂时不可用，请稍后再试");
             }
 
-            // 解析响应
             if (response == null || response.getChoices() == null
                     || response.getChoices().isEmpty()) {
                 log.error("DeepSeek API 返回空响应(第{}轮)", i);
@@ -287,22 +332,16 @@ public class AgentService {
             messages.add(responseMessage);
 
             if (toolCalls == null || toolCalls.isEmpty()) {
-                // 无 tool_calls → 最终回答
                 conversationStore.clearCheckpoint(conversationId);
                 String content = responseMessage.getContent();
-                log.info("Agent 返回最终回答(第{}轮): length={}", i,
-                        content != null ? content.length() : 0);
                 return AgentResponse.done(content != null ? content : "");
             }
 
             if (!planConfirmed) {
-                // 首次 tool_calls → 生成操作计划确认点
-                log.info("生成操作计划确认点(第{}轮): toolCalls={}",
-                        i, toolCalls.size());
                 return createPlanConfirmation(conversationId, messages, toolCalls);
             }
 
-            // 已确认计划 → 逐个执行
+            // ——已确认计划，逐个执行——
             List<Map<String, Object>> approvedPlan = conversationStore.getApprovedPlan(conversationId);
 
             for (int t = 0; t < toolCalls.size(); t++) {
@@ -325,15 +364,31 @@ public class AgentService {
                     continue;
                 }
 
+                // Layer 3: CapabilityGuard 校验
+                String lastUserMessage = messages.stream()
+                        .filter(m -> "user".equals(m.getRole()))
+                        .map(Message::getContent)
+                        .reduce((first, second) -> second)
+                        .orElse("");
+                CapabilityGuard.Result guardResult = capabilityGuard.validate(lastUserMessage, meta);
+                if (!guardResult.isPassed()) {
+                    log.warn("能力校验不通过: tool={}, reason={}", toolName, guardResult.getReason());
+                    messages.add(new Message("system",
+                            "你选择的工具 [" + toolName + "] 可能不适用于当前请求。请选择其他工具。"));
+                    continue;
+                }
+
+                // 记录调用频率
+                frequencyTracker.recordCall(toolName);
+
                 if (meta.getAction() == ActionType.WRITE
                         && !toolRegistry.isAutoConfirm(meta.getName())) {
-                    // 非白名单写操作 → 二次确认
                     List<ToolCall> remaining = toolCalls.subList(t + 1, toolCalls.size());
                     log.info("二次确认: tool={}, remaining={}", toolName, remaining.size());
                     return createExecConfirmation(conversationId, messages, tc, remaining);
                 }
 
-                // 直接执行（READ 或白名单 WRITE）
+                // 直接执行
                 try {
                     String result = toolRegistry.execute(tc);
                     messages.add(new Message("tool", result, tc.getId()));
@@ -346,7 +401,6 @@ public class AgentService {
             }
         }
 
-        // 达到最大迭代次数
         log.warn("ReAct 循环达到最大迭代次数: conversationId={}", conversationId);
         conversationStore.clearCheckpoint(conversationId);
         return AgentResponse.done("任务未完全执行，已达最大处理轮次。请尝试简化操作需求。");
@@ -446,6 +500,12 @@ public class AgentService {
                 confirmationId, toolCall.getFunction().getName(),
                 pendingToolCalls != null ? pendingToolCalls.size() : 0);
         return AgentResponse.waitConfirm(cp);
+    }
+
+    /** 从会话存储恢复工具 schemas */
+    private List<Map<String, Object>> restoreToolSchemas(String conversationId) {
+        List<Map<String, Object>> schemas = conversationStore.getSelectedToolSchemas(conversationId);
+        return schemas != null ? schemas : toolRegistry.toJsonSchema();
     }
 
     /**

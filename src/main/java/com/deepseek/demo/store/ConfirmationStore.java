@@ -47,30 +47,49 @@ public class ConfirmationStore {
      */
     public static class ConfirmationState {
         /** 关联的对话会话 ID */
-        public String conversationId;
+        private String conversationId;
         /** 确认点类型：plan（计划确认）或 exec（写操作二次确认） */
-        public String type;
+        private String type;
         /** plan 类型：LLM 提议的完整操作列表 */
-        public List<Map<String, Object>> planToolCalls;
+        private List<Map<String, Object>> planToolCalls;
         /** exec 类型：要执行的工具名称 */
-        public String toolName;
+        private String toolName;
         /** exec 类型：原始 tool_call 的 ID */
-        public String toolCallId;
+        private String toolCallId;
         /**
          * exec 类型：工具参数的 JSON 字符串。
          * 跨确认边界保留原始 JSON 参数，避免反序列化/再序列化造成精度丢失。
          */
-        public String toolArguments;
+        private String toolArguments;
         /** exec 类型：待执行的 tool_call 列表（包含当前调用及其后续调用） */
-        public List<ToolCall> pendingToolCalls;
+        private List<ToolCall> pendingToolCalls;
         /** 创建时间戳（毫秒） */
-        public long createdAt;
+        private long createdAt;
         /** 是否已被消费（确认或拒绝后标记） */
-        public boolean consumed;
+        private boolean consumed;
 
         public ConfirmationState() {
             this.createdAt = System.currentTimeMillis();
         }
+
+        public String getConversationId() { return conversationId; }
+        public void setConversationId(String conversationId) { this.conversationId = conversationId; }
+        public String getType() { return type; }
+        public void setType(String type) { this.type = type; }
+        public List<Map<String, Object>> getPlanToolCalls() { return planToolCalls; }
+        public void setPlanToolCalls(List<Map<String, Object>> planToolCalls) { this.planToolCalls = planToolCalls; }
+        public String getToolName() { return toolName; }
+        public void setToolName(String toolName) { this.toolName = toolName; }
+        public String getToolCallId() { return toolCallId; }
+        public void setToolCallId(String toolCallId) { this.toolCallId = toolCallId; }
+        public String getToolArguments() { return toolArguments; }
+        public void setToolArguments(String toolArguments) { this.toolArguments = toolArguments; }
+        public List<ToolCall> getPendingToolCalls() { return pendingToolCalls; }
+        public void setPendingToolCalls(List<ToolCall> pendingToolCalls) { this.pendingToolCalls = pendingToolCalls; }
+        public long getCreatedAt() { return createdAt; }
+        public void setCreatedAt(long createdAt) { this.createdAt = createdAt; }
+        public boolean isConsumed() { return consumed; }
+        public void setConsumed(boolean consumed) { this.consumed = consumed; }
     }
 
     /**
@@ -93,9 +112,9 @@ public class ConfirmationStore {
      */
     public String createPlanConfirmation(String conversationId, List<Map<String, Object>> plan) {
         ConfirmationState state = new ConfirmationState();
-        state.conversationId = conversationId;
-        state.type = "plan";
-        state.planToolCalls = plan;
+        state.setConversationId(conversationId);
+        state.setType("plan");
+        state.setPlanToolCalls(plan);
 
         String confirmationId = UUID.randomUUID().toString();
         confirmations.put(confirmationId, state);
@@ -115,14 +134,14 @@ public class ConfirmationStore {
     public String createExecConfirmation(String conversationId, ToolCall toolCall,
                                           List<ToolCall> pendingToolCalls) {
         ConfirmationState state = new ConfirmationState();
-        state.conversationId = conversationId;
-        state.type = "exec";
+        state.setConversationId(conversationId);
+        state.setType("exec");
         if (toolCall != null) {
-            state.toolName = toolCall.getFunction() != null ? toolCall.getFunction().getName() : null;
-            state.toolCallId = toolCall.getId();
-            state.toolArguments = toolCall.getFunction() != null ? toolCall.getFunction().getArguments() : null;
+            state.setToolName(toolCall.getFunction() != null ? toolCall.getFunction().getName() : null);
+            state.setToolCallId(toolCall.getId());
+            state.setToolArguments(toolCall.getFunction() != null ? toolCall.getFunction().getArguments() : null);
         }
-        state.pendingToolCalls = pendingToolCalls;
+        state.setPendingToolCalls(pendingToolCalls);
 
         String confirmationId = UUID.randomUUID().toString();
         confirmations.put(confirmationId, state);
@@ -143,7 +162,7 @@ public class ConfirmationStore {
             return null;
         }
         // 检查是否已过期（兜底检查，防止清理任务未及时执行）
-        if (System.currentTimeMillis() - state.createdAt > TimeUnit.MINUTES.toMillis(EXPIRATION_MINUTES)) {
+        if (System.currentTimeMillis() - state.getCreatedAt() > TimeUnit.MINUTES.toMillis(EXPIRATION_MINUTES)) {
             confirmations.remove(confirmationId);
             log.debug("确认点 {} 已过期，自动移除", confirmationId);
             return null;
@@ -161,7 +180,7 @@ public class ConfirmationStore {
     public void consume(String confirmationId) {
         ConfirmationState state = confirmations.get(confirmationId);
         if (state != null) {
-            state.consumed = true;
+            state.setConsumed(true);
             log.debug("确认点 {} 已标记为已消费", confirmationId);
         }
     }
@@ -187,7 +206,7 @@ public class ConfirmationStore {
         long expiryMillis = TimeUnit.MINUTES.toMillis(EXPIRATION_MINUTES);
         int removed = 0;
         for (Map.Entry<String, ConfirmationState> entry : confirmations.entrySet()) {
-            if (now - entry.getValue().createdAt > expiryMillis) {
+            if (now - entry.getValue().getCreatedAt() > expiryMillis) {
                 confirmations.remove(entry.getKey());
                 removed++;
             }

@@ -42,11 +42,11 @@ class ConfirmationStoreTest {
 
         ConfirmationState state = store.get(confirmationId);
         assertNotNull(state);
-        assertEquals("conv-1", state.conversationId);
-        assertEquals("plan", state.type);
-        assertEquals(1, state.planToolCalls.size());
-        assertEquals("createTask", state.planToolCalls.get(0).get("action"));
-        assertFalse(state.consumed);
+        assertEquals("conv-1", state.getConversationId());
+        assertEquals("plan", state.getType());
+        assertEquals(1, state.getPlanToolCalls().size());
+        assertEquals("createTask", state.getPlanToolCalls().get(0).get("action"));
+        assertFalse(state.isConsumed());
     }
 
     @Test
@@ -60,13 +60,13 @@ class ConfirmationStoreTest {
 
         ConfirmationState state = store.get(confirmationId);
         assertNotNull(state);
-        assertEquals("conv-1", state.conversationId);
-        assertEquals("exec", state.type);
-        assertEquals("createTask", state.toolName);
-        assertEquals("call_123", state.toolCallId);
-        assertEquals("{\"title\":\"测试\"}", state.toolArguments);
-        assertEquals(1, state.pendingToolCalls.size());
-        assertFalse(state.consumed);
+        assertEquals("conv-1", state.getConversationId());
+        assertEquals("exec", state.getType());
+        assertEquals("createTask", state.getToolName());
+        assertEquals("call_123", state.getToolCallId());
+        assertEquals("{\"title\":\"测试\"}", state.getToolArguments());
+        assertEquals(1, state.getPendingToolCalls().size());
+        assertFalse(state.isConsumed());
     }
 
     @Test
@@ -92,7 +92,6 @@ class ConfirmationStoreTest {
 
     @Test
     void shouldConsumeNonExistentConfirmationGracefully() {
-        // 消费不存在的确认点不应抛出异常
         store.consume("non-existent");
     }
 
@@ -101,7 +100,6 @@ class ConfirmationStoreTest {
         String confirmationId = store.createPlanConfirmation("conv-1",
                 Arrays.asList(Collections.singletonMap("action", "test")));
 
-        // 立即清理 — 还未过期，应保留
         store.cleanupExpired();
         assertNotNull(store.get(confirmationId));
     }
@@ -116,8 +114,8 @@ class ConfirmationStoreTest {
 
         assertNotNull(store.get(planId));
         assertNotNull(store.get(execId));
-        assertEquals("plan", store.get(planId).type);
-        assertEquals("exec", store.get(execId).type);
+        assertEquals("plan", store.get(planId).getType());
+        assertEquals("exec", store.get(execId).getType());
     }
 
     @Test
@@ -125,10 +123,10 @@ class ConfirmationStoreTest {
         String confirmationId = store.createExecConfirmation("conv-1", null, new ArrayList<>());
         ConfirmationState state = store.get(confirmationId);
         assertNotNull(state);
-        assertEquals("exec", state.type);
-        assertNull(state.toolName);
-        assertNull(state.toolCallId);
-        assertNull(state.toolArguments);
+        assertEquals("exec", state.getType());
+        assertNull(state.getToolName());
+        assertNull(state.getToolCallId());
+        assertNull(state.getToolArguments());
     }
 
     @Test
@@ -138,10 +136,10 @@ class ConfirmationStoreTest {
 
         ConfirmationState state = store.get(confirmationId);
         assertNotNull(state);
-        assertEquals("exec", state.type);
-        assertNull(state.toolName);
-        assertNull(state.toolArguments);
-        assertEquals("call_456", state.toolCallId);
+        assertEquals("exec", state.getType());
+        assertNull(state.getToolName());
+        assertNull(state.getToolArguments());
+        assertEquals("call_456", state.getToolCallId());
     }
 
     @Test
@@ -149,12 +147,10 @@ class ConfirmationStoreTest {
         String confirmationId = store.createPlanConfirmation("conv-1",
                 Arrays.asList(Collections.singletonMap("action", "test")));
 
-        // 直接修改状态的创建时间使其过期
         ConfirmationState state = store.get(confirmationId);
         assertNotNull(state);
-        state.createdAt = System.currentTimeMillis() - 10 * 60 * 1000; // 10分钟前
+        state.setCreatedAt(System.currentTimeMillis() - 10 * 60 * 1000);
 
-        // get 方法应该检测到并返回 null
         assertNull(store.get(confirmationId));
     }
 }

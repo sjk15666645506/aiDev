@@ -44,7 +44,9 @@ public class ToolMeta {
         this.requiredParams = requiredParams;
         this.action = action;
         this.domain = domain;
-        this.capabilities = capabilities;
+        this.capabilities = capabilities == null
+                ? List.of()
+                : List.copyOf(capabilities);
         this.bean = bean;
         this.method = method;
     }

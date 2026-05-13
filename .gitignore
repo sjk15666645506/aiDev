@@ -55,5 +55,3 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
-### Secrets ###
-src/main/resources/application.yml

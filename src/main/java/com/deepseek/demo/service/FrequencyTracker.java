@@ -1,6 +1,5 @@
 package com.deepseek.demo.service;
 
-import com.deepseek.demo.annotation.ToolDomain;
 import org.springframework.stereotype.Component;
 
 import java.util.*;
@@ -23,17 +22,19 @@ public class FrequencyTracker {
 
     /** 记录一次工具调用 */
     public void recordCall(String toolName) {
-        freqs.computeIfAbsent(toolName, k -> new ToolFreq());
-        ToolFreq f = freqs.get(toolName);
-        f.count++;
-        f.lastUsed = System.currentTimeMillis();
+        freqs.compute(toolName, (k, v) -> {
+            ToolFreq f = (v == null) ? new ToolFreq() : v;
+            f.count++;
+            f.lastUsed = System.currentTimeMillis();
+            return f;
+        });
     }
 
     /**
-     * 获取指定领域中最频繁使用的 N 个工具。
+     * 获取调用频率最高的 N 个工具名称。
      * 按 "调用次数 × 时间衰减" 排序。
      */
-    public List<String> getMostUsed(ToolDomain domain, int limit) {
+    public List<String> getMostUsed(int limit) {
         long now = System.currentTimeMillis();
         return freqs.entrySet().stream()
                 .map(e -> {

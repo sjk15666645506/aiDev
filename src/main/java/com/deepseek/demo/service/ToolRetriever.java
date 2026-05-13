@@ -81,7 +81,7 @@ public class ToolRetriever {
 
         // 先加语义检索到的（必须是目标领域）
         for (ToolVectorStore.ScoredTool st : scored) {
-            ToolMeta meta = toolRegistry.getTool(st.getName());
+            ToolMeta meta = safeGetTool(st.getName());
             if (meta != null && meta.getDomain() == domain) {
                 selected.add(st.getName());
             }
@@ -89,10 +89,13 @@ public class ToolRetriever {
 
         // 如果不足 topK，补充该领域最近使用频率最高的
         if (selected.size() < topK) {
-            List<String> popular = frequencyTracker.getMostUsed(domain, topK - selected.size());
+            List<String> popular = frequencyTracker.getMostUsed(topK - selected.size());
             for (String name : popular) {
                 if (selected.size() >= topK) break;
-                selected.add(name);
+                ToolMeta meta = safeGetTool(name);
+                if (meta != null && meta.getDomain() == domain) {
+                    selected.add(name);
+                }
             }
         }
 
@@ -105,7 +108,7 @@ public class ToolRetriever {
         }
 
         List<ToolMeta> result = selected.stream()
-                .map(toolRegistry::getTool)
+                .map(this::safeGetTool)
                 .filter(Objects::nonNull)
                 .collect(Collectors.toList());
 
@@ -124,6 +127,15 @@ public class ToolRetriever {
             sb.append(". Capabilities: ").append(String.join(", ", meta.getCapabilities()));
         }
         return sb.toString();
+    }
+
+    /** 安全获取工具，不存在时返回 null 而非抛异常 */
+    private ToolMeta safeGetTool(String name) {
+        try {
+            return toolRegistry.getTool(name);
+        } catch (IllegalArgumentException e) {
+            return null;
+        }
     }
 
     private String truncate(String s, int maxLen) {

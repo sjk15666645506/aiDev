@@ -37,3 +37,23 @@ build/
 
 ### Mac OS ###
 .DS_Store
+
+### Maven local repo ###
+D:/maven-repository/
+
+### IDE ###
+.idea/
+
+### Build ###
+.mvn/
+
+### Claude ###
+.claude/
+
+### Cache ###
+__pycache__/
+*.pyc
+.pytest_cache/
+
+### Secrets ###
+src/main/resources/application.yml

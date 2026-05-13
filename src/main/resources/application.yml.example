@@ -1,5 +1,5 @@
 deepseek:
-  api-key: sk-8160be89fcea4fc985ef6c923e2385c0
+  api-key: ${DEEPSEEK_API_KEY}
   base-url: https://api.deepseek.com
 
 qdrant:

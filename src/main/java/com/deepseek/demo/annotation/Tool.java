@@ -28,4 +28,13 @@ public @interface Tool {
 
     /** 操作类型，决定是否需要二次确认 */
     ActionType action() default ActionType.READ;
+
+    /** 工具归属领域。DomainRouter 据此按领域筛选工具 */
+    ToolDomain domain() default ToolDomain.SEARCH;
+
+    /**
+     * 工具提供的能力标签，用于 CapabilityGuard 校验。
+     * 格式: "domain:action"，如 "task:read"、"task:write"、"code:search"
+     */
+    String[] capabilities() default {};
 }

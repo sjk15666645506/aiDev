@@ -55,18 +55,24 @@ public class ToolVectorStore {
      * 余弦相似度检索，按相似度降序返回。
      */
     public List<ScoredTool> search(float[] query, int topK) {
-        if (store.isEmpty()) {
+        if (store.isEmpty() || topK <= 0) {
             return Collections.emptyList();
         }
 
-        return store.entrySet().stream()
+        List<ScoredTool> results = store.entrySet().stream()
                 .map(entry -> new ScoredTool(
                         entry.getKey(),
                         cosineSimilarity(query, entry.getValue())))
-                .filter(r -> r.getScore() > 0)
                 .sorted((a, b) -> Float.compare(b.getScore(), a.getScore()))
                 .limit(topK)
                 .collect(Collectors.toList());
+
+        if (results.isEmpty() || results.get(0).getScore() <= 0) {
+            log.warn("语义检索未找到匹配结果: 最高得分={}",
+                    results.isEmpty() ? "N/A" : results.get(0).getScore());
+        }
+
+        return results;
     }
 
     /**

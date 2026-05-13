@@ -1,0 +1,20 @@
+deepseek:
+  api-key: test-api-key
+  base-url: https://api.deepseek.com
+
+qdrant:
+  host: localhost
+  port: 16333
+  doc-collection: aiknowledge-doc
+
+ollama:
+  host: localhost
+  port: 11434
+  model: nomic-embed-text
+
+meilisearch:
+  host: localhost
+  port: 7700
+
+server:
+  port: 8081

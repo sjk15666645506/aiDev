@@ -18,6 +18,7 @@ import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Consumer;
 
 @Service
@@ -113,6 +114,86 @@ public class DeepSeekService {
         long elapsed = System.currentTimeMillis() - start;
         log.debug("DeepSeek API响应: status={},耗时={}ms", response.getStatusCode(), elapsed);
         return response.getBody();
+    }
+
+    /**
+     * 带 function calling 工具的非流式对话。
+     * <p>
+     * 在原有对话基础上追加 tools 参数，使 LLM 可以在适当时机调用预定义的函数。
+     * 内置重试和错误处理：
+     * <ul>
+     *   <li>HTTP 429 限流：等待 2s 后重试，最多 2 次</li>
+     *   <li>HTTP 401 鉴权：不重试，直接返回错误</li>
+     *   <li>网络超时：重试 1 次</li>
+     * </ul>
+     *
+     * @param messages 消息列表（含 system/user/assistant/tool 角色）
+     * @param tools    DeepSeek function calling 的工具定义 JSON Schema 列表
+     * @return DeepSeek API 原始响应（含 tool_calls）
+     * @throws RuntimeException 所有重试失败后抛出
+     */
+    public DeepSeekChatResponse chatWithTools(List<Message> messages,
+                                               List<Map<String, Object>> tools) {
+        String url = baseUrl + "/v1/chat/completions";
+
+        DeepSeekChatRequest request = new DeepSeekChatRequest(messages);
+        request.setTools(tools);
+        request.setToolChoice("auto");
+
+        HttpHeaders headers = new HttpHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        headers.setBearerAuth(apiKey);
+
+        HttpEntity<DeepSeekChatRequest> entity = new HttpEntity<>(request, headers);
+
+        int maxAttempts = 2;
+        int attempt = 0;
+
+        while (attempt < maxAttempts) {
+            attempt++;
+            try {
+                log.debug("调用 DeepSeek API(带 tools): url={}, toolsCount={}, attempt={}/{}",
+                        url, tools != null ? tools.size() : 0, attempt, maxAttempts);
+
+                long start = System.currentTimeMillis();
+                ResponseEntity<DeepSeekChatResponse> response = restTemplate.postForEntity(
+                        url, entity, DeepSeekChatResponse.class);
+                long elapsed = System.currentTimeMillis() - start;
+
+                DeepSeekChatResponse body = response.getBody();
+                boolean hasToolCalls = body != null && body.getChoices() != null
+                        && !body.getChoices().isEmpty()
+                        && body.getChoices().get(0).getToolCalls() != null;
+
+                log.info("DeepSeek API(带 tools)响应: status={}, 耗时={}ms, hasToolCalls={}",
+                        response.getStatusCode(), elapsed, hasToolCalls);
+
+                return body;
+
+            } catch (org.springframework.web.client.HttpClientErrorException e) {
+                if (e.getRawStatusCode() == 429) {
+                    log.warn("DeepSeek API 限流(429), 等待重试: attempt={}/{}", attempt, maxAttempts);
+                    if (attempt < maxAttempts) {
+                        try { Thread.sleep(2000); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
+                        continue;
+                    }
+                    throw new RuntimeException("请求过于频繁，请稍后再试");
+                } else if (e.getRawStatusCode() == 401) {
+                    log.error("DeepSeek API 鉴权失败(401)");
+                    throw new RuntimeException("API 认证失败");
+                }
+                log.error("DeepSeek API HTTP 错误: status={}", e.getRawStatusCode());
+                if (attempt < maxAttempts) continue;
+                throw new RuntimeException("服务异常");
+
+            } catch (org.springframework.web.client.ResourceAccessException e) {
+                log.warn("DeepSeek API 网络错误, 重试: attempt={}/{}", attempt, maxAttempts);
+                if (attempt < maxAttempts) continue;
+                throw new RuntimeException("服务暂时不可用，请稍后再试");
+            }
+        }
+
+        throw new RuntimeException("服务暂时不可用，请稍后再试");
     }
 
     /**

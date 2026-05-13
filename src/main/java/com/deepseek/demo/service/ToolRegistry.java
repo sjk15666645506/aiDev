@@ -2,6 +2,7 @@ package com.deepseek.demo.service;
 
 import com.deepseek.demo.annotation.ActionType;
 import com.deepseek.demo.annotation.Tool;
+import com.deepseek.demo.annotation.ToolDomain;
 import com.deepseek.demo.annotation.ToolParam;
 import com.deepseek.demo.dto.ToolCall;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -98,7 +99,6 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
 
                 // 解析 @Tool 注解
                 String name = toolAnnotation.name();
-                String description = toolAnnotation.description();
                 ActionType action = toolAnnotation.action();
                 ToolParam[] toolParams = toolAnnotation.parameters();
 
@@ -118,10 +118,21 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
                     }
                 }
 
+                // 收集 capabilities
+                List<String> capabilities = Arrays.asList(toolAnnotation.capabilities());
+
                 // 注册工具
                 ToolMeta meta = new ToolMeta(
-                        name, description, parameters, requiredParams,
-                        action, bean, method);
+                        name,
+                        toolAnnotation.description(),
+                        parameters,
+                        requiredParams,
+                        toolAnnotation.action(),
+                        toolAnnotation.domain(),
+                        capabilities,
+                        bean,
+                        method
+                );
                 tools.put(name, meta);
                 totalFound++;
                 log.info("注册工具: name={}, action={}, bean={}, method={}",

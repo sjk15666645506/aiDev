@@ -1,6 +1,7 @@
 package com.deepseek.demo.service;
 
 import com.deepseek.demo.annotation.ActionType;
+import com.deepseek.demo.annotation.ToolDomain;
 import java.lang.reflect.Method;
 import java.util.List;
 import java.util.Map;
@@ -21,6 +22,10 @@ public class ToolMeta {
     private final List<String> requiredParams;
     /** 操作类型 */
     private final ActionType action;
+    /** 工具归属领域 */
+    private final ToolDomain domain;
+    /** 工具提供的能力标签 */
+    private final List<String> capabilities;
     /** Bean 实例引用 */
     private final Object bean;
     /** 方法引用 */
@@ -29,12 +34,17 @@ public class ToolMeta {
     public ToolMeta(String name, String description,
                     List<Map<String, Object>> parameters,
                     List<String> requiredParams,
-                    ActionType action, Object bean, Method method) {
+                    ActionType action,
+                    ToolDomain domain,
+                    List<String> capabilities,
+                    Object bean, Method method) {
         this.name = name;
         this.description = description;
         this.parameters = parameters;
         this.requiredParams = requiredParams;
         this.action = action;
+        this.domain = domain;
+        this.capabilities = capabilities;
         this.bean = bean;
         this.method = method;
     }
@@ -45,6 +55,8 @@ public class ToolMeta {
     public List<Map<String, Object>> getParameters() { return parameters; }
     public List<String> getRequiredParams() { return requiredParams; }
     public ActionType getAction() { return action; }
+    public ToolDomain getDomain() { return domain; }
+    public List<String> getCapabilities() { return capabilities; }
     public Object getBean() { return bean; }
     public Method getMethod() { return method; }
 }

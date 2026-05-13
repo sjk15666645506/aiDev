@@ -96,6 +96,13 @@ public class DeepSeekChatResponse {
         @JsonProperty("finish_reason")
         private String finishReason;
 
+        /**
+         * LLM 发起的工具调用列表。
+         * 当模型决定调用函数时，此字段非空，message.content 可能为 null。
+         */
+        @JsonProperty("tool_calls")
+        private List<ToolCall> toolCalls;
+
         public int getIndex() {
             return index;
         }
@@ -118,6 +125,14 @@ public class DeepSeekChatResponse {
 
         public void setFinishReason(String finishReason) {
             this.finishReason = finishReason;
+        }
+
+        public List<ToolCall> getToolCalls() {
+            return toolCalls;
+        }
+
+        public void setToolCalls(List<ToolCall> toolCalls) {
+            this.toolCalls = toolCalls;
         }
     }
 

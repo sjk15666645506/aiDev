@@ -12,6 +12,8 @@ import org.springframework.test.web.servlet.MockMvc;
 
 import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.when;
+import static org.hamcrest.Matchers.notNullValue;
+import static org.hamcrest.Matchers.matchesRegex;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
 
@@ -73,13 +75,18 @@ class AgentControllerTest {
     }
 
     @Test
-    void chat_ShouldReturnBadRequest_WhenConversationIdMissing() throws Exception {
+    void chat_ShouldAutoGenerateConversationId_WhenNotProvided() throws Exception {
+        when(agentService.chat(anyString(), eq("Hello")))
+                .thenReturn(AgentResponse.done("Hi!"));
+
         mockMvc.perform(post("/api/agent/chat")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"message\":\"Hello\"}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.type").value("error"))
-                .andExpect(jsonPath("$.reply").value("conversation_id 不能为空"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.type").value("done"))
+                .andExpect(jsonPath("$.conversationId").value(notNullValue()))
+                .andExpect(jsonPath("$.conversationId").value(matchesRegex(
+                        "[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}")));
     }
 
     @Test
@@ -93,13 +100,16 @@ class AgentControllerTest {
     }
 
     @Test
-    void chat_ShouldReturnBadRequest_WhenConversationIdEmpty() throws Exception {
+    void chat_ShouldAutoGenerateConversationId_WhenEmpty() throws Exception {
+        when(agentService.chat(anyString(), eq("Hello")))
+                .thenReturn(AgentResponse.done("Hi!"));
+
         mockMvc.perform(post("/api/agent/chat")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"conversation_id\":\"\",\"message\":\"Hello\"}"))
-                .andExpect(status().isBadRequest())
-                .andExpect(jsonPath("$.type").value("error"))
-                .andExpect(jsonPath("$.reply").value("conversation_id 不能为空"));
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.type").value("done"))
+                .andExpect(jsonPath("$.conversationId").value(notNullValue()));
     }
 
     @Test

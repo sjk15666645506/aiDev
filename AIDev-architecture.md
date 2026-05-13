@@ -30,6 +30,11 @@
 | ⑱ | **MD5** | 哈希算法。将任意数据映射为固定长度指纹，用于判断文件是否变更 |
 | ⑲ | **watchdog** | Python 文件系统监听库，实时监控目录中的文件创建/修改/删除 |
 | ⑳ | **防抖 (debounce)** | 连续触发时只执行最后一次，本系统设为 2 秒，避免频繁保存导致重复索引 |
+| ㉑ | **Redis** | 内存键值数据库。本系统用于存储会话状态和确认点，String 类型 + JSON，TTL 自动过期 |
+| ㉒ | **Agent** | 智能体。本系统的 ReAct 引擎，LLM 自主规划操作、调用工具、迭代执行直至完成任务 |
+| ㉓ | **ReAct** | Reasoning + Acting 循环。LLM 交替进行推理决策和工具调用，每一步基于上一步结果继续 |
+| ㉔ | **Tool Calling** | LLM 调用预定义 API 的机制。DeepSeek 原生支持 function calling，返回 tool_calls |
+| ㉕ | **Confirmation** | 确认机制。操作计划确认 + 写操作二次确认，HITL（Human-in-the-Loop）保障安全 |
 
 ---
 
@@ -52,12 +57,28 @@
 │      │   │                 │                                    │
 │      ▼   ▼                 ▼                                    │
 │  ┌─────────────┐  ┌──────────────────┐                         │
-│  │ DeepSeekSvc │  │  GeneralRagSvc ① │                         │
-│  │ (LLM②调用)   │  │  (RAG编排)       │                         │
+│  │ DeepSeekSvc │  │  AgentSvc ㉒      │                         │
+│  │ (LLM②调用)   │  │  (ReAct 循环㉓)   │                         │
 │  └─────────────┘  └────────┬─────────┘                         │
 │                            │                                    │
-│              ┌─────────────┼─────────────┐                      │
-│              ▼             ▼             ▼                      │
+│  ┌──────────────────────────────────────────────────────┐       │
+│  │               Agent 模块组件                          │       │
+│  │  ┌──────────────┐  ┌──────────────────┐              │       │
+│  │  │ ToolRegistry │  │ ConversationStore│              │       │
+│  │  │ (@Tool扫描)   │  │ (Redis㉑ 会话存储) │              │       │
+│  │  └──────────────┘  └──────────────────┘              │       │
+│  │  ┌──────────────┐  ┌──────────────────┐              │       │
+│  │  │ Confirmation │  │  Example Tools    │              │       │
+│  │  │ Store(Redis) │  │  (Task/External) │              │       │
+│  │  └──────────────┘  └──────────────────┘              │       │
+│  └──────────────────────────────────────────────────────┘       │
+│                                                                  │
+│  ┌─────────────┐  ┌──────────────────┐                         │
+│  │GeneralRagSvc①│  │  (RAG编排)        │                         │
+│  └────────┬─────┘  └──────────────────┘                         │
+│           │                                                     │
+│  ┌────────┼────────┐                                            │
+│  ▼        ▼        ▼                                            │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
 │  │ VectorService│  │MeiliSearchSvc│  │  FileParser   │          │
 │  │ (Qdrant⑤向量) │  │(BM25⑨全文)   │  │(docx/xlsx)   │          │
@@ -65,11 +86,11 @@
 └─────────┼──────────────────┼────────────────────────────────────┘
           │                  │
           ▼                  ▼
-┌─────────────────┐  ┌──────────────────────┐
-│  Qdrant (16333) │  │ Meilisearch (7700) ⑧│
-│  向量数据库⑤     │  │ 全文搜索引擎          │
-│  collection⑥:   │  │ index: aiknowledge-doc│
-│  aiknowledge-doc│  └──────────────────────┘
+┌─────────────────┐  ┌──────────────────────┐  ┌─────────────────┐
+│  Qdrant (16333) │  │ Meilisearch (7700) ⑧│  │  Redis (6379) ㉑│
+│  向量数据库⑤     │  │ 全文搜索引擎          │  │  会话/确认点存储  │
+│  collection⑥:   │  │ index: aiknowledge-doc│  │  TTL 自动过期   │
+│  aiknowledge-doc│  └──────────────────────┘  └─────────────────┘
 └────────┬────────┘
          │
          ▼
@@ -99,26 +120,57 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 ├── src/main/java/com/deepseek/demo/
 │   ├── DeepSeekApplication.java           # Spring Boot 入口
 │   ├── config/
-│   │   └── AppConfig.java                 # RestTemplate⑰ 连接池(32总/8路由) + 超时(5s/30s)
+│   │   ├── AppConfig.java                 # RestTemplate⑰ 连接池(32总/8路由) + 超时(5s/30s)
+│   │   └── RedisConfig.java               # Redis㉑ 配置 Bean
+│   ├── annotation/                        # Agent㉒ 注解层
+│   │   ├── Tool.java                      # @Tool 注解
+│   │   ├── ToolParam.java                 # @ToolParam 注解
+│   │   └── ActionType.java                # 枚举 READ / WRITE㉕
 │   ├── controller/
 │   │   ├── DeepSeekController.java        # 聊天 & 知识库 API
-│   │   └── KnowledgeController.java       # 文档摄入 & 同步 API
+│   │   ├── KnowledgeController.java       # 文档摄入 & 同步 API
+│   │   └── AgentController.java           # Agent㉒ 对话 & 确认 API
 │   ├── dto/
-│   │   ├── DeepSeekChatRequest.java       # LLM② 请求体
-│   │   ├── DeepSeekChatResponse.java      # LLM 响应体
-│   │   └── Message.java                   # 消息体
-│   └── service/
-│       ├── DeepSeekService.java           # DeepSeek LLM 调用
-│       ├── GeneralRagService.java         # 文档 RAG① 编排
-│       ├── VectorService.java             # Qdrant⑤ 向量搜索 + 混合检索(RRF⑩)
-│       ├── MeiliSearchService.java        # Meilisearch⑧ 全文搜索
-│       └── FileParser.java                # docx/xlsx 文件解析
+│   │   ├── DeepSeekChatRequest.java       # LLM② 请求体（扩展 tools/tool_choice）
+│   │   ├── DeepSeekChatResponse.java      # LLM 响应体（扩展 tool_calls㉔）
+│   │   ├── Message.java                   # 消息体（扩展 toolCalls/toolCallId/name）
+│   │   ├── ToolCall.java                  # ToolCall㉔ DTO
+│   │   ├── FunctionCall.java              # FunctionCall DTO
+│   │   ├── AgentResponse.java             # Agent 统一响应
+│   │   └── ConfirmationPoint.java         # 确认点㉕ DTO
+│   ├── service/
+│   │   ├── DeepSeekService.java           # DeepSeek LLM 调用（含 chatWithTools）
+│   │   ├── GeneralRagService.java         # 文档 RAG① 编排
+│   │   ├── VectorService.java             # Qdrant⑤ 向量搜索 + 混合检索(RRF⑩)
+│   │   ├── MeiliSearchService.java        # Meilisearch⑧ 全文搜索
+│   │   ├── FileParser.java                # docx/xlsx 文件解析
+│   │   ├── AgentService.java              # Agent㉒ ReAct㉓ 循环引擎
+│   │   ├── ToolRegistry.java              # 工具注册中心（注解扫描/反射执行）
+│   │   ├── ToolMeta.java                  # 工具元数据模型
+│   │   └── tools/
+│   │       ├── TaskTools.java             # 任务管理工具集
+│   │       └── ExternalTools.java         # 外部服务工具集
+│   └── store/                             # Redis㉑ 持久化层
+│       ├── ConversationStore.java         # 会话上下文存储（Redis, TTL 30min）
+│       └── ConfirmationStore.java         # 确认点存储（Redis, TTL 5min）
 ├── src/main/resources/
 │   ├── application.yml                    # 本地配置（${DEEPSEEK_API_KEY}，不写真实 key）
 │   └── application.yml.example            # 配置模板，供新开发者参考
 ├── src/test/java/com/deepseek/demo/
-│   ├── controller/DeepSeekControllerTest.java
-│   └── service/DeepSeekServiceTest.java
+│   ├── controller/
+│   │   ├── DeepSeekControllerTest.java
+│   │   └── AgentControllerTest.java
+│   ├── service/
+│   │   ├── DeepSeekServiceTest.java
+│   │   ├── AgentServiceTest.java
+│   │   └── ToolRegistryTest.java
+│   ├── store/
+│   │   ├── ConversationStoreTest.java
+│   │   └── ConfirmationStoreTest.java
+│   └── dto/
+│       ├── AgentResponseTest.java
+│       ├── DeepSeekApiDtoTest.java
+│       └── MessageDtoTest.java
 ├── ingestion-pipeline/                    # Python 摄入管线
 │   ├── ingest.py                          # 文档分块⑪ + embedding③ + 写入
 │   └── requirements.txt                   # Python 依赖
@@ -143,6 +195,16 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 | MeiliSearchService | Meilisearch⑧ BM25⑨ 全文检索 | 7700 | Meilisearch HTTP API |
 | FileParser | docx/xlsx 文件文本提取 | — | Apache POI |
 | ingest.py | 文件分块⑪、embedding③、双路写入 | — | Ollama⑫ Python SDK |
+| AgentController | Agent㉒ 对话 & 确认回调 HTTP 入口 | 8081 | Spring Boot |
+| AgentService | ReAct㉓ 循环引擎：规划 → 确认 → 执行 → 迭代 | — | DeepSeek API㉔ |
+| ToolRegistry | @Tool 注解扫描、JSON Schema 生成、反射调用 | — | Spring Bean |
+| DomainRouter | Layer1: 意图→领域分类，轻量 LLM 调用 | — | DeepSeek API |
+| ToolRetriever | Layer2: 领域内语义+频率工具召回 | — | ToolVectorStore + VectorService |
+| CapabilityGuard | Layer3: 执行前能力关键词校验 | — | 规则引擎 |
+| ToolVectorStore | 工具 Embedding 内存向量存储（余弦距离） | — | ConcurrentHashMap |
+| FrequencyTracker | 工具调用频率追踪（时间衰减） | — | ConcurrentHashMap |
+| ConversationStore | 会话上下文 Redis㉑ 存储 | 6379 | Redis + Jackson |
+| ConfirmationStore | 确认点 Redis㉑ 存储 | 6379 | Redis + Jackson |
 
 ### 3.2 DeepSeekService — LLM 调用
 
@@ -224,7 +286,91 @@ ragChat(question, limit)
 | .xlsx / .xls | XSSFWorkbook → 逐行逐列 | poi-ooxml |
 | .txt / .md / .csv / .json / .xml / .yml / .properties / .html / .css | Files.readString | — |
 
-### 3.7 ingest.py — 文档摄入管线
+### 3.7 AgentService㉒ — ReAct㉓ 引擎
+
+核心循环：三层路由引擎前置过滤工具，LLM 交替进行推理和工具调用㉔，直至生成最终回答或达到最大轮次。
+
+```
+agentChat(conversationId, userMessage)
+   │
+   ▼
+┌─ Layer 1: 领域路由 ──────────────────┐
+│  DomainRouter.classify()             │
+│  LLM 判断用户意图 → 选择一个 ToolDomain │
+│  （任务管理 / 代码仓库 / CI_CD / ……）    │
+└──────────────────────────────────────┘
+   │
+   ▼
+┌─ Layer 2: 工具召回 ──────────────────┐
+│  ToolRetriever.retrieve(domain, topK)│
+│  语义向量检索 + 频率衰减补全           │
+│  → 取 topK 工具 Schema 传给 LLM      │
+└──────────────────────────────────────┘
+   │
+   ▼
+① RAG 检索知识库 → 拼入 system prompt
+   │
+   ▼
+② 初始化 messages list
+   [system(含知识库), user(用户提问)]
+   │
+   ▼
+③ ReAct㉓ 循环 (max 10 轮)
+   │
+   ├─ 调用 DeepSeek API（带 tools㉔）
+   │
+   ├─ 无 tool_calls → 返回最终回答 ✅
+   │
+   └─ 有 tool_calls
+         │
+         ├─ planConfirmed = false → 生成操作计划确认点㉕
+         │    存 checkpoint 后 return，等用户确认
+         │
+         └─ planConfirmed = true → 逐个执行
+              │
+              ┌─ Layer 3: CapabilityGuard.validate()
+              │  用户消息 vs 工具能力关键词 → 拒绝则返回 LLM
+              │
+              ├─ 校验通过 → FrequencyTracker 记录调用
+              │   ├─ READ           → 直接执行
+              │   ├─ WRITE + 白名单  → 直接执行
+              │   └─ WRITE + 非白名单 → 生成二次确认点㉕
+              │
+              ▼
+           执行结果追加 messages[role=tool]
+           → 继续循环（③）
+```
+
+**双重确认机制㉕**：
+- **确认点 #1（操作计划确认）**：LLM 返回 tool_calls 且 planConfirmed=false 时触发，用户确认后开始逐项执行
+- **确认点 #2（写操作二次确认）**：非白名单 WRITE 操作逐项确认，防止误写
+- 确认点存储于 Redis㉑，TTL 5 分钟
+
+### 3.8 ToolRegistry — 工具注册中心
+
+```
+启动时：
+  @PostConstruct → 扫描所有 Bean → 收集 @Tool 注解方法
+  → 注册到 Map<String, ToolMeta> → 可生成 DeepSeek JSON Schema㉔
+
+运行时：
+  execute(toolCall) → 反射调用对应方法 + 10s 超时保护
+  isAutoConfirm(toolName) → 判断是否在白名单中（跳过二次确认㉕）
+```
+
+### 3.9 ConversationStore — 会话存储
+
+- 存储位置：Redis㉑ `conversation:{conversationId}`（String 类型 + Jackson JSON）
+- 存储内容：消息历史、checkpoint 轮次、planConfirmed 标志、已批准的操作计划
+- 过期策略：TTL 30 分钟，无访问自动过期，无需定时任务
+
+### 3.10 ConfirmationStore — 确认点存储
+
+- 存储位置：Redis㉑ `confirmation:{confirmationId}`（String 类型 + Jackson JSON）
+- 两种类型：plan（操作计划确认）、exec（写操作二次确认）
+- 过期策略：TTL 5 分钟，由 Redis 过期键自动清理
+
+### 3.11 ingest.py — 文档摄入管线
 
 ```
 ingest.py <directory> [options]
@@ -305,6 +451,8 @@ RestTemplate 使用 Apache HttpClient 连接池，避免每次请求创建新连
 | POST | `/api/chat/knowledge/search` | 纯检索（不经 LLM②） |
 | POST | `/api/knowledge/ingest/doc` | 文档摄入 |
 | POST | `/api/knowledge/sync/meilisearch` | Qdrant⑤ → Meilisearch⑧ 全量同步 |
+| POST | `/api/agent/chat` | Agent㉒ 对话入口（非流式） |
+| POST | `/api/agent/confirm` | Agent 确认回调㉕（确认/拒绝/反馈） |
 
 ---
 
@@ -362,8 +510,17 @@ meilisearch:
   host: localhost
   port: 7700
 
+spring:
+  redis:                              # Agent㉒ 会话 & 确认点存储
+    host: localhost
+    port: 6379
+    timeout: 2000
+
 server:
   port: 8081
+
+tool:
+  whitelist: ${TOOL_WHITELIST:send_notification,update_task_status,feishu_send_message}
 ```
 
 ---
@@ -374,6 +531,7 @@ server:
 |------|------|----------|
 | Qdrant⑤ | v1.18.0 | Docker (`qdrant/qdrant:v1.18.0`) |
 | Meilisearch⑧ | 1.43.0 | Homebrew (`brew services start meilisearch`) |
+| Redis㉑ | 7.x | Homebrew (`brew services start redis`) |
 | Ollama⑫ | 0.23.2 | 本地运行 |
 | Embedding③ 模型 | nomic-embed-text⑬ | `ollama pull nomic-embed-text` |
 | Java | 11 | Maven 管理 |
@@ -392,6 +550,13 @@ server:
 | 检索策略 | 向量④ + BM25⑨ 双路 + RRF⑩ 合并(k=60) | 语义+关键词互补，提高召回率 |
 | 低分过滤阈值 | RRF 得分 ≥ 0.01 | RRF 得分非绝对值，阈值过低无意义，过高则丢失结果；0.01 ≈ 单路前 40 名 |
 | 上下文截断 | 12000 字符 | 限制送入 LLM 的知识量，减少噪声 |
+| **Agent㉒ 模式** | **ReAct㉓ 循环 + HITL㉕ 双重确认** | **LLM 自主规划执行，关键写操作人工兜底** |
+| **会话持久化** | **Redis㉑ String + JSON** | **比内存方案更可靠，TTL 自动过期无需定时清理；Jackson 手动序列化避免 JDK 序列化兼容问题** |
+| **二次确认㉕ 策略** | **WRITE + 非白名单 → 确认点** | **白名单（飞书等可信操作）自动执行，非白名单写操作逐项确认，平衡效率与安全** |
+| **路由架构** | **三层路由：DomainRouter → ToolRetriever → CapabilityGuard** | **逐层过滤工具空间，减少 LLM 误调用、提高准确率** |
+| **领域分类** | **LLM 轻量调用（DeepSeek + 简短系统提示）** | **比关键词匹配更准确理解用户意图，比完整 ReAct 更轻量（单次调用）** |
+| **工具召回** | **语义 Embedding（nomic-embed-text）+ 频率衰减补全** | **语义检索找到功能匹配的工具，频率补全兜底冷启动和 Embedding 失败** |
+| **能力校验** | **关键词规则引擎（CapabilityKeywords 中英文 11 组映射）** | **极低延迟（纯内存匹配），拒绝明显不匹配的调用，减少 LLM 幻觉执行** |
 | 降级策略 | 组件异常时静默降级 | 不阻塞主流程 |
 
 ---
@@ -406,3 +571,12 @@ server:
 | 上下文超长 | 按 score 排序截断至 12000 字符 |
 | Ollama⑫ embedding③ 失败 | 3 次重试，指数退避 |
 | 文件读取异常 | 跳过该文件，不中断整体流程 |
+| **DeepSeek API 网络错误** | **RestTemplate⑰ 5s 连接超时，捕获 `ResourceAccessException`，重试 1 次** |
+| **DeepSeek API 限流 (429)** | **等待 2s 后重试，最多 2 次，仍失败返回"请求过于频繁"** |
+| **DeepSeek API 鉴权失败 (401)** | **不重试，记录错误日志，返回"API 认证失败"** |
+| **Tool㉔ 执行异常** | **异常信息以 tool role 回送 LLM，由 LLM 决定重试或告知用户** |
+| **Tool 超时** | **单次执行 10s 超时保护，超时信息回送 LLM** |
+| **ReAct㉓ 满 10 轮** | **返回已有结果 + 提示"任务可能未完全执行"** |
+| **确认点过期 (TTL 5min)** | **Redis㉑ 自动过期，返回"确认已过期，请重新提问"** |
+| **确认点重复消费** | **consumed 标志去重，返回"该操作已处理"** |
+| **Tool 不在已批准计划中** | **跳过该调用，追加 system 提示** |

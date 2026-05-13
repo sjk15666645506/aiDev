@@ -2,33 +2,36 @@ package com.deepseek.demo.store;
 
 import com.deepseek.demo.dto.Message;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * ConversationStore 的单元测试。
- * 覆盖消息存取、检查点、计划确认、审批计划以及过期清理功能。
+ * ConversationStore 的集成测试（Redis 后端）。
+ * 覆盖消息存取、检查点、计划确认和审批计划功能。
+ * 过期清理由 Redis TTL 自动完成，不在此处测试。
  */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class ConversationStoreTest {
 
+    @Autowired
     private ConversationStore store;
 
-    @BeforeEach
-    void setUp() {
-        store = new ConversationStore();
-    }
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
+    /** 清理测试数据 */
     @AfterEach
     void tearDown() {
-        store.shutdown();
+        Set<String> keys = redisTemplate.keys("conversation:*");
+        if (keys != null && !keys.isEmpty()) {
+            redisTemplate.delete(keys);
+        }
     }
 
     @Test
@@ -75,13 +78,10 @@ class ConversationStoreTest {
         List<Message> messages = Arrays.asList(new Message("user", "创建任务"));
 
         store.saveCheckpoint("conv-1", messages, 5);
-        // 验证检查点已保存 — 通过 getMessages 间接验证消息已写入
         List<Message> retrieved = store.getMessages("conv-1");
         assertEquals(1, retrieved.size());
 
-        // 清除检查点
         store.clearCheckpoint("conv-1");
-        // 再次保存验证 checkpoint 已重置
         store.saveCheckpoint("conv-1", messages, 0);
         List<Message> afterClear = store.getMessages("conv-1");
         assertEquals(1, afterClear.size());
@@ -89,7 +89,6 @@ class ConversationStoreTest {
 
     @Test
     void shouldClearCheckpointForNonExistentConversation() {
-        // 对不存在的会话清除检查点不应抛出异常
         store.clearCheckpoint("non-existent");
     }
 
@@ -101,7 +100,7 @@ class ConversationStoreTest {
     @Test
     void shouldSetAndReturnPlanConfirmed() {
         boolean previous = store.setPlanConfirmed("conv-1", true);
-        assertFalse(previous); // 首次设置，之前应为 false
+        assertFalse(previous);
 
         assertTrue(store.getPlanConfirmed("conv-1"));
     }
@@ -135,33 +134,6 @@ class ConversationStoreTest {
         assertNotNull(retrieved);
         assertEquals(1, retrieved.size());
         assertEquals("createTask", retrieved.get(0).get("action"));
-    }
-
-    @Test
-    void shouldUpdateLastAccessTimeOnRead() throws InterruptedException {
-        store.saveMessages("conv-1", Arrays.asList(new Message("user", "Hello")));
-
-        // 等待一小段时间
-        Thread.sleep(10);
-
-        // 再次读取，应该更新 lastAccessTime
-        store.getMessages("conv-1");
-
-        // 调用清理 — 消息应该在过期时间内，不会被移除
-        store.cleanupExpired();
-        List<Message> messages = store.getMessages("conv-1");
-        assertEquals(1, messages.size());
-    }
-
-    @Test
-    void shouldCleanupExpiredConversations() throws InterruptedException {
-        store.saveMessages("expired-conv", Arrays.asList(new Message("user", "old")));
-
-        // 手动修改消息的最后访问时间（通过重新保存并等待）
-        // 由于 lastAccessTime 是内部状态，我们等待足够长时间...
-        // 但更好的方式是验证 cleanupExpired 的逻辑：通过保存后立即清理，它应该还在
-        store.cleanupExpired();
-        assertFalse(store.getMessages("expired-conv").isEmpty());
     }
 
     @Test

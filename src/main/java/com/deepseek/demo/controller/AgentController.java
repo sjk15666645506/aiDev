@@ -8,6 +8,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.Map;
+import java.util.UUID;
 
 /**
  * Agent API 控制器，提供 LLM function calling + ReAct 的 HTTP 端点。
@@ -38,15 +39,17 @@ public class AgentController {
      * 请求体格式：
      * <pre>
      * {
-     *   "conversation_id": "conv-xxx",  // 客户端生成，用于保持对话上下文
+     *   "conversation_id": "conv-xxx",  // 可选，首次请求由服务端自动生成
      *   "message": "帮我查一下张三的工单"    // 用户输入
      * }
      * </pre>
      * <p>
+     * 首次请求可不传 {@code conversation_id}，服务端自动生成 UUID 并返回。
+     * <p>
      * 响应体格式（三种类型）：
      * <pre>
      * // 最终回答
-     * {"type": "done", "reply": "查询结果..."}
+     * {"type": "done", "reply": "查询结果...", "conversation_id": "uuid-xxx"}
      *
      * // 需要确认
      * {"type": "confirmation", "confirmation_point": {...}}
@@ -60,9 +63,10 @@ public class AgentController {
         String conversationId = request.get("conversation_id");
         String message = request.get("message");
 
+        // conversation_id 为空时自动生成，首次请求无需客户端构造
         if (conversationId == null || conversationId.isEmpty()) {
-            return ResponseEntity.badRequest()
-                    .body(AgentResponse.error("conversation_id 不能为空"));
+            conversationId = UUID.randomUUID().toString();
+            log.debug("已自动生成 conversationId={}", conversationId);
         }
         if (message == null || message.isEmpty()) {
             return ResponseEntity.badRequest()
@@ -73,6 +77,7 @@ public class AgentController {
                 truncate(conversationId, 20), truncate(message, 50));
 
         AgentResponse response = agentService.chat(conversationId, message);
+        response.setConversationId(conversationId);
 
         log.info("Agent 响应: type={}", response.getType());
         return ResponseEntity.ok(response);

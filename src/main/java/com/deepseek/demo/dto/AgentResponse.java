@@ -15,6 +15,9 @@ public class AgentResponse {
     /** 响应类型：done / confirmation / error */
     private String type;
 
+    /** 对话会话 ID，首次请求由服务端生成，后续请求由客户端传入 */
+    private String conversationId;
+
     /** LLM 回答文本（type=done/error 时有效） */
     private String reply;
 
@@ -64,6 +67,8 @@ public class AgentResponse {
 
     public String getType() { return type; }
     public void setType(String type) { this.type = type; }
+    public String getConversationId() { return conversationId; }
+    public void setConversationId(String conversationId) { this.conversationId = conversationId; }
     public String getReply() { return reply; }
     public void setReply(String reply) { this.reply = reply; }
     public ConfirmationPoint getConfirmationPoint() { return confirmationPoint; }

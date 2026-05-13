@@ -4,29 +4,36 @@ import com.deepseek.demo.dto.FunctionCall;
 import com.deepseek.demo.dto.ToolCall;
 import com.deepseek.demo.store.ConfirmationStore.ConfirmationState;
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 /**
- * ConfirmationStore 的单元测试。
- * 覆盖 plan/exec 确认点的创建、获取、消费和过期清理功能。
+ * ConfirmationStore 的集成测试（Redis 后端）。
+ * 覆盖 plan/exec 确认点的创建、获取和消费功能。
+ * 过期清理由 Redis TTL 自动完成，不在此处测试。
  */
+@SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class ConfirmationStoreTest {
 
+    @Autowired
     private ConfirmationStore store;
 
-    @BeforeEach
-    void setUp() {
-        store = new ConfirmationStore();
-    }
+    @Autowired
+    private StringRedisTemplate redisTemplate;
 
+    /** 清理测试数据 */
     @AfterEach
     void tearDown() {
-        store.shutdown();
+        Set<String> keys = redisTemplate.keys("confirmation:*");
+        if (keys != null && !keys.isEmpty()) {
+            redisTemplate.delete(keys);
+        }
     }
 
     @Test
@@ -96,15 +103,6 @@ class ConfirmationStoreTest {
     }
 
     @Test
-    void shouldExpireOldConfirmations() {
-        String confirmationId = store.createPlanConfirmation("conv-1",
-                Arrays.asList(Collections.singletonMap("action", "test")));
-
-        store.cleanupExpired();
-        assertNotNull(store.get(confirmationId));
-    }
-
-    @Test
     void shouldHandleMultipleConfirmations() {
         String planId = store.createPlanConfirmation("conv-1",
                 Arrays.asList(Collections.singletonMap("action", "plan1")));
@@ -140,17 +138,5 @@ class ConfirmationStoreTest {
         assertNull(state.getToolName());
         assertNull(state.getToolArguments());
         assertEquals("call_456", state.getToolCallId());
-    }
-
-    @Test
-    void shouldNotReturnExpiredConfirmation() {
-        String confirmationId = store.createPlanConfirmation("conv-1",
-                Arrays.asList(Collections.singletonMap("action", "test")));
-
-        ConfirmationState state = store.get(confirmationId);
-        assertNotNull(state);
-        state.setCreatedAt(System.currentTimeMillis() - 10 * 60 * 1000);
-
-        assertNull(store.get(confirmationId));
     }
 }

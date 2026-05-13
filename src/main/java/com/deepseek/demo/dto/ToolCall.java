@@ -1,8 +1,5 @@
 package com.deepseek.demo.dto;
 
-import com.fasterxml.jackson.annotation.JsonProperty;
-import java.util.List;
-
 /**
  * DeepSeek function calling 返回的 tool_call 对象。
  * 对应 API 响应中 choices[0].message.tool_calls[i] 的结构。

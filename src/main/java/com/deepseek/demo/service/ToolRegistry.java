@@ -162,6 +162,20 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
     }
 
     /**
+     * 将指定工具列表转换为 DeepSeek function calling 的 JSON Schema 格式。
+     *
+     * @param toolMetas 要转换的工具列表
+     * @return JSON Schema 列表
+     */
+    public List<Map<String, Object>> toJsonSchema(List<ToolMeta> toolMetas) {
+        List<Map<String, Object>> schemas = new ArrayList<>();
+        for (ToolMeta meta : toolMetas) {
+            schemas.add(buildJsonSchema(meta));
+        }
+        return schemas;
+    }
+
+    /**
      * 为单个工具构建 JSON Schema
      */
     private Map<String, Object> buildJsonSchema(ToolMeta meta) {
@@ -210,6 +224,27 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
             throw new IllegalArgumentException("未知工具: " + name);
         }
         return meta;
+    }
+
+    /**
+     * 获取所有已注册的工具（只读视图）
+     *
+     * @return 工具名称到元数据的不可变映射
+     */
+    public Map<String, ToolMeta> getAllTools() {
+        return Collections.unmodifiableMap(tools);
+    }
+
+    /**
+     * 按领域获取工具。
+     *
+     * @param domain 目标领域
+     * @return 该领域下的所有工具列表
+     */
+    public List<ToolMeta> getByDomain(ToolDomain domain) {
+        return tools.values().stream()
+                .filter(meta -> meta.getDomain() == domain)
+                .collect(Collectors.toList());
     }
 
     /**

@@ -3,6 +3,7 @@ package com.deepseek.demo.controller;
 import com.deepseek.demo.dto.AgentResponse;
 import com.deepseek.demo.dto.ConfirmationPoint;
 import com.deepseek.demo.service.AgentService;
+import com.deepseek.demo.store.ConversationStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -25,6 +26,9 @@ class AgentControllerTest {
 
     @MockBean
     private AgentService agentService;
+
+    @MockBean
+    private ConversationStore conversationStore;
 
     // --- /api/agent/chat tests ---
 

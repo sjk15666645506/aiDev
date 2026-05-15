@@ -6,12 +6,15 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.dao.DataAccessException;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,6 +38,12 @@ public class ConversationStore {
     private final RedisTemplate<String, String> redisTemplate;
     private final ObjectMapper objectMapper;
 
+    /** Redis 不可用时的本地缓存降级 */
+    private final ConcurrentHashMap<String, ConversationState> localCache = new ConcurrentHashMap<>();
+
+    /** Redis 是否处于降级模式 */
+    private volatile boolean redisDegraded = false;
+
     public ConversationStore(RedisTemplate<String, String> redisTemplate, ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
@@ -55,6 +64,8 @@ public class ConversationStore {
         Object approvedPlan = null;
         /** 当前会话选中的工具 schemas（用于确认回调时恢复） */
         Object selectedToolSchemas = null;
+        /** 追踪 ID，贯穿 chat→confirm 多轮交互 */
+        String traceId = null;
         /** 最后访问时间戳（毫秒） */
         long lastAccessTime = System.currentTimeMillis();
     }
@@ -71,12 +82,24 @@ public class ConversationStore {
      * @return ConversationState 对象，不存在时返回空状态
      */
     private ConversationState load(String conversationId) {
-        String json = redisTemplate.opsForValue().get(key(conversationId));
-        if (json == null) {
-            return new ConversationState();
-        }
         try {
+            String json = redisTemplate.opsForValue().get(key(conversationId));
+            // Redis 操作成功，如果之前处于降级模式则恢复
+            if (redisDegraded) {
+                redisDegraded = false;
+                log.warn("Redis 已恢复，退出本地缓存降级模式");
+            }
+            if (json == null) {
+                return new ConversationState();
+            }
             return objectMapper.readValue(json, ConversationState.class);
+        } catch (RedisConnectionFailureException e) {
+            if (!redisDegraded) {
+                redisDegraded = true;
+                log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+            }
+            ConversationState local = localCache.get(conversationId);
+            return local != null ? local : new ConversationState();
         } catch (JsonProcessingException e) {
             log.warn("会话反序列化失败: conversationId={}", conversationId, e);
             return new ConversationState();
@@ -92,8 +115,19 @@ public class ConversationStore {
             String json = objectMapper.writeValueAsString(state);
             redisTemplate.opsForValue().set(key(conversationId), json,
                     EXPIRATION_MINUTES, TimeUnit.MINUTES);
+            // Redis 操作成功，如果之前处于降级模式则恢复
+            if (redisDegraded) {
+                redisDegraded = false;
+                log.warn("Redis 已恢复，退出本地缓存降级模式");
+            }
         } catch (JsonProcessingException e) {
             log.error("会话序列化失败: conversationId={}", conversationId, e);
+        } catch (RedisConnectionFailureException e) {
+            if (!redisDegraded) {
+                redisDegraded = true;
+                log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+            }
+            localCache.put(conversationId, state);
         }
     }
 
@@ -107,8 +141,15 @@ public class ConversationStore {
         ConversationState state = load(conversationId);
         if (state.messages.isEmpty()) {
             // 首次访问不触发 save（无内容可写），
-            // 仅 touch Redis 以重置 TTL
-            redisTemplate.expire(key(conversationId), EXPIRATION_MINUTES, TimeUnit.MINUTES);
+            // 仅 touch Redis 以重置 TTL；降级模式下忽略
+            if (!redisDegraded) {
+                try {
+                    redisTemplate.expire(key(conversationId), EXPIRATION_MINUTES, TimeUnit.MINUTES);
+                } catch (RedisConnectionFailureException e) {
+                    redisDegraded = true;
+                    log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+                }
+            }
         } else {
             save(conversationId, state);
         }
@@ -215,6 +256,29 @@ public class ConversationStore {
     public void setSelectedToolSchemas(String conversationId, List<Map<String, Object>> schemas) {
         ConversationState state = load(conversationId);
         state.selectedToolSchemas = schemas;
+        save(conversationId, state);
+    }
+
+    /**
+     * 获取指定会话的追踪 ID。
+     *
+     * @param conversationId 会话 ID
+     * @return 追踪 ID，不存在则返回 null
+     */
+    public String getTraceId(String conversationId) {
+        ConversationState state = load(conversationId);
+        return state.traceId;
+    }
+
+    /**
+     * 设置指定会话的追踪 ID。
+     *
+     * @param conversationId 会话 ID
+     * @param traceId        追踪 ID
+     */
+    public void setTraceId(String conversationId, String traceId) {
+        ConversationState state = load(conversationId);
+        state.traceId = traceId;
         save(conversationId, state);
     }
 }

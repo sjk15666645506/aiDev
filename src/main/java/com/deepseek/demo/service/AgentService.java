@@ -106,6 +106,9 @@ public class AgentService {
 
             // 5. 生成 filtered tool schemas 并保存到会话存储
             List<Map<String, Object>> toolSchemas = toolRegistry.toJsonSchema(selectedTools);
+            // 始终追加系统级工具（如 delegate_task），使主 Agent 具备委派能力
+            toolSchemas.addAll(toolRegistry.toJsonSchema(
+                    toolRegistry.getByDomain(ToolDomain.SYSTEM)));
             conversationStore.setSelectedToolSchemas(conversationId, toolSchemas);
 
             // 6. 进入 ReAct 循环（传入选定的工具 schemas）
@@ -265,9 +268,8 @@ public class AgentService {
 
         } catch (Exception e) {
             log.error("工具执行失败: tool={}", cp.getToolName(), e);
-            // 将异常信息以 tool role 返回，让 LLM 决定如何处理
             messages.add(new Message("tool",
-                    "工具执行异常: " + e.getMessage(), cp.getToolCallId()));
+                    AgentFallback.toolExecutionFailed(cp.getToolName(), e.getMessage()), cp.getToolCallId()));
             return agentLoop(conversationId, messages, restoreToolSchemas(conversationId));
         }
     }
@@ -318,13 +320,13 @@ public class AgentService {
                 response = deepSeekService.chatWithTools(messages, toolSchemas);
             } catch (Exception e) {
                 log.error("DeepSeek API 调用失败(第{}轮)", i, e);
-                return AgentResponse.error("服务暂时不可用，请稍后再试");
+                return AgentResponse.error(AgentFallback.apiUnavailable());
             }
 
             if (response == null || response.getChoices() == null
                     || response.getChoices().isEmpty()) {
                 log.error("DeepSeek API 返回空响应(第{}轮)", i);
-                return AgentResponse.error("模型返回异常，请重试");
+                return AgentResponse.error(AgentFallback.modelResponseInvalid());
             }
 
             Message responseMessage = response.getChoices().get(0).getMessage();
@@ -343,6 +345,7 @@ public class AgentService {
 
             // ——已确认计划，逐个执行——
             List<Map<String, Object>> approvedPlan = conversationStore.getApprovedPlan(conversationId);
+            int skippedCount = 0;
 
             for (int t = 0; t < toolCalls.size(); t++) {
                 ToolCall tc = toolCalls.get(t);
@@ -351,6 +354,7 @@ public class AgentService {
                 // 校验是否在已批准计划中
                 if (approvedPlan != null && !isInApprovedPlan(toolName, approvedPlan)) {
                     log.warn("工具不在已批准计划中，跳过: tool={}", toolName);
+                    skippedCount++;
                     messages.add(new Message("system",
                             "操作 \"" + toolName + "\" 不在已批准计划中，已跳过。"));
                     continue;
@@ -359,6 +363,7 @@ public class AgentService {
                 ToolMeta meta = toolRegistry.getTool(toolName);
                 if (meta == null) {
                     log.warn("工具不存在，跳过: tool={}", toolName);
+                    skippedCount++;
                     messages.add(new Message("system",
                             "工具 \"" + toolName + "\" 不存在，已跳过。"));
                     continue;
@@ -373,6 +378,7 @@ public class AgentService {
                 CapabilityGuard.Result guardResult = capabilityGuard.validate(lastUserMessage, meta);
                 if (!guardResult.isPassed()) {
                     log.warn("能力校验不通过: tool={}, reason={}", toolName, guardResult.getReason());
+                    skippedCount++;
                     messages.add(new Message("system",
                             "你选择的工具 [" + toolName + "] 可能不适用于当前请求。请选择其他工具。"));
                     continue;
@@ -396,14 +402,21 @@ public class AgentService {
                 } catch (Exception e) {
                     log.error("工具执行失败: tool={}", toolName, e);
                     messages.add(new Message("tool",
-                            "执行异常: " + e.getMessage(), tc.getId()));
+                            AgentFallback.toolExecutionFailed(toolName, e.getMessage()), tc.getId()));
+                    skippedCount++;
                 }
+            }
+
+            // 本轮所有工具均被跳过，无有效操作可执行
+            if (skippedCount == toolCalls.size() && skippedCount > 0) {
+                conversationStore.clearCheckpoint(conversationId);
+                return AgentResponse.done(AgentFallback.noSuitableTool());
             }
         }
 
         log.warn("ReAct 循环达到最大迭代次数: conversationId={}", conversationId);
         conversationStore.clearCheckpoint(conversationId);
-        return AgentResponse.done("任务未完全执行，已达最大处理轮次。请尝试简化操作需求。");
+        return AgentResponse.done(AgentFallback.maxIterationsReached());
     }
 
     /**

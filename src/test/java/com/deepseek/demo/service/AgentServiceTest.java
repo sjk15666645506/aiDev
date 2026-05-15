@@ -145,7 +145,7 @@ class AgentServiceTest {
         AgentResponse result = agentService.chat("conv-3", "查一下");
 
         assertEquals("error", result.getType());
-        assertTrue(result.getReply().contains("服务暂时不可用"));
+        assertTrue(result.getReply().contains("大脑暂时离线"));
     }
 
     // ==================== confirm() 方法测试 ====================
@@ -442,6 +442,6 @@ class AgentServiceTest {
         AgentResponse result = agentService.chat("conv-1", "查工单");
 
         assertEquals("done", result.getType());
-        assertTrue(result.getReply().contains("最大处理轮次"));
+        assertTrue(result.getReply().contains("无法在当前轮次内完成"));
     }
 }

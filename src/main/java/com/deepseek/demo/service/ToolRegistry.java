@@ -47,15 +47,33 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
     /** 是否已完成 @Tool 扫描（确保 ContextRefreshedEvent 只处理一次） */
     private boolean scanned = false;
 
+    /** 工具执行超时秒数 */
+    private final int defaultTimeoutSeconds;
+
+    /** 工具执行最大重试次数（超时后重试） */
+    private final int maxRetries;
+
+    /** 指数退避初始延迟（毫秒） */
+    private final long backoffInitialMs;
+
     /**
      * 构造 ToolRegistry
      *
-     * @param whitelistStr 白名单配置（逗号分隔），来自 application.yml 的 tool.whitelist
-     * @param objectMapper Jackson ObjectMapper
+     * @param whitelistStr      白名单配置（逗号分隔），来自 application.yml 的 tool.whitelist
+     * @param objectMapper      Jackson ObjectMapper
+     * @param defaultTimeoutSeconds 工具执行超时秒数
+     * @param maxRetries        工具执行超时后最大重试次数
+     * @param backoffInitialMs  指数退避初始延迟（毫秒）
      */
     public ToolRegistry(@Value("${tool.whitelist:}") String whitelistStr,
-                        ObjectMapper objectMapper) {
+                        ObjectMapper objectMapper,
+                        @Value("${tool.execution.timeout-seconds:10}") int defaultTimeoutSeconds,
+                        @Value("${tool.execution.max-retries:2}") int maxRetries,
+                        @Value("${tool.execution.backoff-initial-ms:1000}") long backoffInitialMs) {
         this.objectMapper = objectMapper;
+        this.defaultTimeoutSeconds = defaultTimeoutSeconds;
+        this.maxRetries = maxRetries;
+        this.backoffInitialMs = backoffInitialMs;
         // 将逗号分隔的白名单字符串解析为 Set
         this.whitelist = whitelistStr == null || whitelistStr.isEmpty()
                 ? Collections.emptySet()
@@ -64,6 +82,8 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
                         .filter(s -> !s.isEmpty())
                         .collect(Collectors.toCollection(HashSet::new));
         log.info("工具白名单初始化完成: {}", this.whitelist);
+        log.info("工具执行配置: timeout={}s, maxRetries={}, backoffInitialMs={}ms",
+                defaultTimeoutSeconds, maxRetries, backoffInitialMs);
     }
 
     @Override
@@ -263,13 +283,13 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
     /**
      * 执行 LLM 发起的工具调用。
      * <p>
-     * 解析 tool_call 中的参数 JSON，通过反射调用对应方法，
-     * 并设置 10 秒超时保护。
+     * 解析 tool_call 中的参数 JSON，通过反射调用对应方法。
+     * 内置超时保护 + 超时自动重试（指数退避 + 随机抖动）。
      *
      * @param toolCall DeepSeek API 返回的 tool_call 对象
      * @return 工具执行结果字符串
      * @throws IllegalArgumentException 如果工具不存在或参数解析失败
-     * @throws RuntimeException 如果工具执行超时或执行异常
+     * @throws RuntimeException 如果工具执行超时（重试耗尽）或非可重试异常
      */
     public String execute(ToolCall toolCall) {
         String toolName = toolCall.getFunction().getName();
@@ -295,31 +315,69 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
             methodArgs[i] = args.get(paramName);
         }
 
-        // 使用 ExecutorService + Future.get() 执行，带 10 秒超时
-        ExecutorService executor = Executors.newSingleThreadExecutor();
-        try {
-            Future<Object> future = executor.submit(() ->
-                    meta.getMethod().invoke(meta.getBean(), methodArgs));
+        // 执行（带超时重试）
+        String result = executeWithRetry(meta, methodArgs, toolName);
+        log.info("工具执行成功: name={}, result={}", toolName, truncate(result, 100));
+        return result;
+    }
 
-            Object result = future.get(10, TimeUnit.SECONDS);
-            String resultStr = result != null ? result.toString() : "";
-            log.info("工具执行成功: name={}, result={}", toolName, truncate(resultStr, 100));
-            return resultStr;
+    /**
+     * 带指数退避重试的工具执行。
+     * <p>
+     * 仅在超时（TimeoutException）时重试，非可重试异常直接抛出。
+     * 每次重试间隔 = backoffInitialMs * 2^(attempt-1) + 随机抖动(±25%)。
+     *
+     * @param meta       工具元数据
+     * @param methodArgs 方法参数数组
+     * @param toolName   工具名称（日志用）
+     * @return 执行结果字符串
+     */
+    private String executeWithRetry(ToolMeta meta, Object[] methodArgs, String toolName) {
+        int attempt = 0;
+        TimeoutException lastTimeout = null;
 
-        } catch (TimeoutException e) {
-            log.error("工具执行超时: name={}, timeout=10s", toolName);
-            throw new RuntimeException("工具执行超时: " + toolName);
-        } catch (ExecutionException e) {
-            Throwable cause = e.getCause();
-            log.error("工具执行异常: name={}, error={}", toolName, cause != null ? cause.getMessage() : e.getMessage());
-            throw new RuntimeException("工具执行失败: " + (cause != null ? cause.getMessage() : e.getMessage()));
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("工具执行被中断: name={}", toolName);
-            throw new RuntimeException("工具执行被中断: " + toolName);
-        } finally {
-            executor.shutdown();
+        while (attempt <= maxRetries) {
+            if (attempt > 0) {
+                // 指数退避：base * 2^(attempt-1) + jitter ±25%
+                long delay = (long) (backoffInitialMs * Math.pow(2, attempt - 1));
+                delay += (long) (delay * (Math.random() - 0.5) * 0.5);
+                log.warn("重试工具: name={}, attempt={}/{}, delay={}ms",
+                        toolName, attempt, maxRetries, delay);
+                try {
+                    Thread.sleep(delay);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    throw new RuntimeException("工具执行被中断: " + toolName);
+                }
+            }
+
+            attempt++;
+            ExecutorService executor = Executors.newSingleThreadExecutor();
+            try {
+                Future<Object> future = executor.submit(() ->
+                        meta.getMethod().invoke(meta.getBean(), methodArgs));
+                Object result = future.get(defaultTimeoutSeconds, TimeUnit.SECONDS);
+                return result != null ? result.toString() : "";
+            } catch (TimeoutException e) {
+                lastTimeout = e;
+                log.warn("工具执行超时: name={}, timeout={}s, attempt={}/{}",
+                        toolName, defaultTimeoutSeconds, attempt, maxRetries + 1);
+            } catch (ExecutionException e) {
+                Throwable cause = e.getCause();
+                log.error("工具执行异常(不可重试): name={}, error={}",
+                        toolName, cause != null ? cause.getMessage() : e.getMessage());
+                throw new RuntimeException("工具执行失败: " + (cause != null ? cause.getMessage() : e.getMessage()));
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.error("工具执行被中断: name={}", toolName);
+                throw new RuntimeException("工具执行被中断: " + toolName);
+            } finally {
+                executor.shutdown();
+            }
         }
+
+        // 重试耗尽，抛出原始超时异常
+        throw new RuntimeException("工具执行超时(已重试" + maxRetries + "次): " + toolName);
     }
 
     /** 截断长文本用于日志输出 */

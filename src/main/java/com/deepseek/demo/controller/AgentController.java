@@ -2,8 +2,10 @@ package com.deepseek.demo.controller;
 
 import com.deepseek.demo.dto.AgentResponse;
 import com.deepseek.demo.service.AgentService;
+import com.deepseek.demo.store.ConversationStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;
 
@@ -28,9 +30,11 @@ public class AgentController {
     private static final Logger log = LoggerFactory.getLogger(AgentController.class);
 
     private final AgentService agentService;
+    private final ConversationStore conversationStore;
 
-    public AgentController(AgentService agentService) {
+    public AgentController(AgentService agentService, ConversationStore conversationStore) {
         this.agentService = agentService;
+        this.conversationStore = conversationStore;
     }
 
     /**
@@ -73,14 +77,24 @@ public class AgentController {
                     .body(AgentResponse.error("message 不能为空"));
         }
 
-        log.info("收到 Agent 请求: conversationId={}, message={}",
-                truncate(conversationId, 20), truncate(message, 50));
+        // 生成追踪 ID，注入 MDC 以便所有日志自动关联
+        String traceId = UUID.randomUUID().toString().replace("-", "").substring(0, 16);
+        MDC.put("traceId", traceId);
+        conversationStore.setTraceId(conversationId, traceId);
 
-        AgentResponse response = agentService.chat(conversationId, message);
-        response.setConversationId(conversationId);
+        try {
+            log.info("收到 Agent 请求: conversationId={}, message={}",
+                    truncate(conversationId, 20), truncate(message, 50));
 
-        log.info("Agent 响应: type={}", response.getType());
-        return ResponseEntity.ok(response);
+            AgentResponse response = agentService.chat(conversationId, message);
+            response.setConversationId(conversationId);
+            response.setTraceId(traceId);
+
+            log.info("Agent 响应: type={}", response.getType());
+            return ResponseEntity.ok(response);
+        } finally {
+            MDC.remove("traceId");
+        }
     }
 
     /**
@@ -110,14 +124,25 @@ public class AgentController {
                     .body(AgentResponse.error("conversation_id 和 confirmation_id 不能为空"));
         }
 
-        log.info("收到确认请求: confirmationId={}, confirm={}, feedback={}",
-                confirmationId, confirm, feedback);
+        // 恢复追踪 ID 使 confirm 请求的日志与原始 chat 请求关联
+        String traceId = conversationStore.getTraceId(conversationId);
+        if (traceId != null) {
+            MDC.put("traceId", traceId);
+        }
 
-        AgentResponse response = agentService.confirm(
-                conversationId, confirmationId, confirm, feedback);
+        try {
+            log.info("收到确认请求: confirmationId={}, confirm={}, feedback={}",
+                    confirmationId, confirm, feedback);
 
-        log.info("确认响应: type={}", response.getType());
-        return ResponseEntity.ok(response);
+            AgentResponse response = agentService.confirm(
+                    conversationId, confirmationId, confirm, feedback);
+            response.setTraceId(traceId);
+
+            log.info("确认响应: type={}", response.getType());
+            return ResponseEntity.ok(response);
+        } finally {
+            MDC.remove("traceId");
+        }
     }
 
     private String truncate(String s, int maxLen) {

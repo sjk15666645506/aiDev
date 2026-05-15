@@ -5,12 +5,14 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -35,6 +37,12 @@ public class ConfirmationStore {
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
+
+    /** Redis 不可用时的本地缓存降级 */
+    private final ConcurrentHashMap<String, ConfirmationState> localCache = new ConcurrentHashMap<>();
+
+    /** Redis 是否处于降级模式 */
+    private volatile boolean redisDegraded = false;
 
     public ConfirmationStore(StringRedisTemplate redisTemplate, ObjectMapper objectMapper) {
         this.redisTemplate = redisTemplate;
@@ -146,12 +154,25 @@ public class ConfirmationStore {
             String json = objectMapper.writeValueAsString(state);
             redisTemplate.opsForValue().set(key(confirmationId), json,
                     EXPIRATION_MINUTES, TimeUnit.MINUTES);
+            if (redisDegraded) {
+                redisDegraded = false;
+                log.warn("Redis 已恢复，退出本地缓存降级模式");
+            }
             log.info("已创建 {} 确认点: id={}, conversationId={}",
                     state.getType(), confirmationId, state.getConversationId());
             return confirmationId;
         } catch (JsonProcessingException e) {
             log.error("确认点序列化失败", e);
             throw new RuntimeException("确认点创建失败", e);
+        } catch (RedisConnectionFailureException e) {
+            if (!redisDegraded) {
+                redisDegraded = true;
+                log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+            }
+            localCache.put(confirmationId, state);
+            log.info("已创建 {} 确认点(本地缓存): id={}, conversationId={}",
+                    state.getType(), confirmationId, state.getConversationId());
+            return confirmationId;
         }
     }
 
@@ -162,12 +183,22 @@ public class ConfirmationStore {
      * @return ConfirmationState 对象，已过期或不存在则返回 null
      */
     public ConfirmationState get(String confirmationId) {
-        String json = redisTemplate.opsForValue().get(key(confirmationId));
-        if (json == null) {
-            return null;
-        }
         try {
+            String json = redisTemplate.opsForValue().get(key(confirmationId));
+            if (redisDegraded) {
+                redisDegraded = false;
+                log.warn("Redis 已恢复，退出本地缓存降级模式");
+            }
+            if (json == null) {
+                return null;
+            }
             return objectMapper.readValue(json, ConfirmationState.class);
+        } catch (RedisConnectionFailureException e) {
+            if (!redisDegraded) {
+                redisDegraded = true;
+                log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+            }
+            return localCache.get(confirmationId);
         } catch (JsonProcessingException e) {
             log.warn("确认点反序列化失败: confirmationId={}", confirmationId, e);
             return null;
@@ -187,9 +218,18 @@ public class ConfirmationStore {
                 String json = objectMapper.writeValueAsString(state);
                 redisTemplate.opsForValue().set(key(confirmationId), json,
                         EXPIRATION_MINUTES, TimeUnit.MINUTES);
-                log.debug("确认点 {} 已标记为已消费", confirmationId);
+                if (redisDegraded) {
+                    redisDegraded = false;
+                    log.warn("Redis 已恢复，退出本地缓存降级模式");
+                }
             } catch (JsonProcessingException e) {
                 log.error("确认点序列化失败", e);
+            } catch (RedisConnectionFailureException e) {
+                if (!redisDegraded) {
+                    redisDegraded = true;
+                    log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+                }
+                localCache.put(confirmationId, state);
             }
         }
     }

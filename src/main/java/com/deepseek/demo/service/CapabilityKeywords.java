@@ -33,6 +33,8 @@ class CapabilityKeywords {
         CAPABILITY_KEYWORD_MAP.put("doc:read", Set.of("文档", "知识库", "查看", "搜索"));
         CAPABILITY_KEYWORD_MAP.put("user:read", Set.of("用户", "成员", "组织", "查看", "查询"));
         CAPABILITY_KEYWORD_MAP.put("user:write", Set.of("创建", "添加", "用户", "成员", "权限"));
+        CAPABILITY_KEYWORD_MAP.put("finance:trade", Set.of("买入", "购买", "卖出", "交易", "股票", "申购"));
+        CAPABILITY_KEYWORD_MAP.put("finance:query", Set.of("查询", "净值", "持仓", "估值", "行情", "价格"));
     }
 
     /**

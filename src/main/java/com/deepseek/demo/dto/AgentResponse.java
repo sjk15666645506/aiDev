@@ -18,6 +18,9 @@ public class AgentResponse {
     /** 对话会话 ID，首次请求由服务端生成，后续请求由客户端传入 */
     private String conversationId;
 
+    /** 追踪 ID，用于调用链关联日志 */
+    private String traceId;
+
     /** LLM 回答文本（type=done/error 时有效） */
     private String reply;
 
@@ -69,6 +72,8 @@ public class AgentResponse {
     public void setType(String type) { this.type = type; }
     public String getConversationId() { return conversationId; }
     public void setConversationId(String conversationId) { this.conversationId = conversationId; }
+    public String getTraceId() { return traceId; }
+    public void setTraceId(String traceId) { this.traceId = traceId; }
     public String getReply() { return reply; }
     public void setReply(String reply) { this.reply = reply; }
     public ConfirmationPoint getConfirmationPoint() { return confirmationPoint; }

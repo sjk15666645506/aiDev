@@ -145,14 +145,25 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   ├── MeiliSearchService.java        # Meilisearch⑧ 全文搜索
 │   │   ├── FileParser.java                # docx/xlsx 文件解析
 │   │   ├── AgentService.java              # Agent㉒ ReAct㉓ 循环引擎
+│   │   ├── AgentFallback.java             # 兜底回复生成（无工具匹配/异常时）
+│   │   ├── DomainRouter.java              # Layer1: 意图→领域分类
 │   │   ├── ToolRegistry.java              # 工具注册中心（注解扫描/反射执行）
 │   │   ├── ToolMeta.java                  # 工具元数据模型
+│   │   ├── ToolRetriever.java             # Layer2: 语义+频率工具召回
+│   │   ├── ToolVectorStore.java           # 工具 Embedding 内存向量存储
+│   │   ├── CapabilityGuard.java           # Layer3: 执行前能力关键词校验
+│   │   ├── CapabilityKeywords.java        # 域→关键词映射（11 组中英文）
+│   │   ├── FrequencyTracker.java          # 工具调用频率追踪（时间衰减）
+│   │   ├── SubAgent.java                  # 子 Agent 执行器（多 Agent 协作）
 │   │   └── tools/
 │   │       ├── TaskTools.java             # 任务管理工具集
-│   │       └── ExternalTools.java         # 外部服务工具集
-│   └── store/                             # Redis㉑ 持久化层
+│   │       ├── ExternalTools.java         # 外部服务工具集
+│   │       ├── FinanceTools.java          # 金融计算工具集
+│   │       └── MultiAgentTools.java       # 多 Agent 委派工具集
+│   └── store/                             # 持久化层（Redis + 本地缓存降级）
 │       ├── ConversationStore.java         # 会话上下文存储（Redis, TTL 30min）
-│       └── ConfirmationStore.java         # 确认点存储（Redis, TTL 5min）
+│       ├── ConfirmationStore.java         # 确认点存储（Redis, TTL 5min）
+│       └── LocalCache.java                # 本地缓存（TTL + 容量上限逐出）
 ├── src/main/resources/
 │   ├── application.yml                    # 本地配置（${DEEPSEEK_API_KEY}，不写真实 key）
 │   └── application.yml.example            # 配置模板，供新开发者参考
@@ -203,8 +214,9 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 | CapabilityGuard | Layer3: 执行前能力关键词校验 | — | 规则引擎 |
 | ToolVectorStore | 工具 Embedding 内存向量存储（余弦距离） | — | ConcurrentHashMap |
 | FrequencyTracker | 工具调用频率追踪（时间衰减） | — | ConcurrentHashMap |
-| ConversationStore | 会话上下文 Redis㉑ 存储 | 6379 | Redis + Jackson |
-| ConfirmationStore | 确认点 Redis㉑ 存储 | 6379 | Redis + Jackson |
+| ConversationStore | 会话上下文 Redis㉑ 存储（降级切 LocalCache） | 6379 | Redis + Jackson |
+| ConfirmationStore | 确认点 Redis㉑ 存储（降级切 LocalCache） | 6379 | Redis + Jackson |
+| LocalCache | 本地缓存：TTL 过期 + 容量上限逐出 | — | ConcurrentHashMap + ScheduledExecutor |
 
 ### 3.2 DeepSeekService — LLM 调用
 
@@ -344,7 +356,26 @@ agentChat(conversationId, userMessage)
 **双重确认机制㉕**：
 - **确认点 #1（操作计划确认）**：LLM 返回 tool_calls 且 planConfirmed=false 时触发，用户确认后开始逐项执行
 - **确认点 #2（写操作二次确认）**：非白名单 WRITE 操作逐项确认，防止误写
-- 确认点存储于 Redis㉑，TTL 5 分钟
+- 确认点存储于 Redis㉑，TTL 5 分钟，降级时切 LocalCache
+
+### 3.7.1 SubAgent — 子 Agent 执行器
+
+被 `MultiAgentTools.delegateTask` 调用，在主 Agent 的 ReAct 循环内独立执行子任务：
+
+```
+主 Agent 识别到需要其他领域专家处理
+  → 调用 delegate_task 工具
+    → SubAgent.execute(task, domain)
+      → 限定于目标领域的工具列表（如 FINANCE 只有金融工具）
+      → mini ReAct 循环（最多 3 轮，无确认流程）
+      → 返回最终结果给主 Agent
+```
+
+特点：无 Redis 持久化、无确认流程、工具域隔离——子 Agent 只管执行并返回，结果由主 Agent 汇总统筹。
+
+### 3.7.2 AgentFallback — 兜底回复
+
+当 Agent 链路异常时（无匹配工具、工具调用失败、LLM 异常、满 10 轮），生成用户友好的中文兜底消息，避免将技术异常暴露给用户。
 
 ### 3.8 ToolRegistry — 工具注册中心
 
@@ -362,13 +393,15 @@ agentChat(conversationId, userMessage)
 
 - 存储位置：Redis㉑ `conversation:{conversationId}`（String 类型 + Jackson JSON）
 - 存储内容：消息历史、checkpoint 轮次、planConfirmed 标志、已批准的操作计划
-- 过期策略：TTL 30 分钟，无访问自动过期，无需定时任务
+- 过期策略：Redis TTL 30 分钟，无访问自动过期
+- **降级策略**：Redis 不可用时自动切换 `LocalCache`（1000 条容量上限 / 30 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
 
 ### 3.10 ConfirmationStore — 确认点存储
 
 - 存储位置：Redis㉑ `confirmation:{confirmationId}`（String 类型 + Jackson JSON）
 - 两种类型：plan（操作计划确认）、exec（写操作二次确认）
-- 过期策略：TTL 5 分钟，由 Redis 过期键自动清理
+- 过期策略：Redis TTL 5 分钟
+- **降级策略**：Redis 不可用时自动切换 `LocalCache`（500 条容量上限 / 5 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
 
 ### 3.11 ingest.py — 文档摄入管线
 
@@ -521,6 +554,16 @@ server:
 
 tool:
   whitelist: ${TOOL_WHITELIST:send_notification,update_task_status,feishu_send_message}
+
+store:
+  conversation:
+    local-cache:
+      max-capacity: 1000        # Redis 降级本地缓存上限
+      ttl-minutes: 30            # 降级缓存条目 TTL
+  confirmation:
+    local-cache:
+      max-capacity: 500          # 确认点本地缓存上限
+      ttl-minutes: 5             # 确认点缓存 TTL（与 Redis 一致）
 ```
 
 ---
@@ -571,6 +614,8 @@ tool:
 | 上下文超长 | 按 score 排序截断至 12000 字符 |
 | Ollama⑫ embedding③ 失败 | 3 次重试，指数退避 |
 | 文件读取异常 | 跳过该文件，不中断整体流程 |
+| **Redis 连接断开** | **ConversationStore / ConfirmationStore 自动切换 LocalCache（本地内存），Redis 恢复后静默切回** |
+| **本地缓存超限** | **LocalCache 随机逐出旧条目 + 定时清理过期条目（基于 createdAt），防止 OOM** |
 | **DeepSeek API 网络错误** | **RestTemplate⑰ 5s 连接超时，捕获 `ResourceAccessException`，重试 1 次** |
 | **DeepSeek API 限流 (429)** | **等待 2s 后重试，最多 2 次，仍失败返回"请求过于频繁"** |
 | **DeepSeek API 鉴权失败 (401)** | **不重试，记录错误日志，返回"API 认证失败"** |
@@ -580,3 +625,7 @@ tool:
 | **确认点过期 (TTL 5min)** | **Redis㉑ 自动过期，返回"确认已过期，请重新提问"** |
 | **确认点重复消费** | **consumed 标志去重，返回"该操作已处理"** |
 | **Tool 不在已批准计划中** | **跳过该调用，追加 system 提示** |
+| **无工具匹配用户意图** | **AgentFallback.noSuitableTool()，返回"没有找到能处理该请求的工具"** |
+| **LLM API 异常** | **AgentFallback.apiUnavailable()，返回"大脑暂时离线，请稍后再试"** |
+| **Tool 调用返回异常** | **AgentFallback.toolExecutionFailed(name, detail)，异常回送 LLM 决定重试或告知用户** |
+| **CapabilityGuard 校验不通过** | **拒绝执行，错误回送 LLM，由 LLM 修正调用或改用其他方式** |

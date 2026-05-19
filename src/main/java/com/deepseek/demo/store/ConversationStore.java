@@ -11,10 +11,10 @@ import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
+import org.springframework.beans.factory.annotation.Value;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -38,15 +38,18 @@ public class ConversationStore {
     private final RedisTemplate<String, String> redisTemplate;
     private final ObjectMapper objectMapper;
 
-    /** Redis 不可用时的本地缓存降级 */
-    private final ConcurrentHashMap<String, ConversationState> localCache = new ConcurrentHashMap<>();
+    /** Redis 不可用时的本地缓存降级（TTL + 容量上限） */
+    private final LocalCache<String, ConversationState> localCache;
 
     /** Redis 是否处于降级模式 */
     private volatile boolean redisDegraded = false;
 
-    public ConversationStore(RedisTemplate<String, String> redisTemplate, ObjectMapper objectMapper) {
+    public ConversationStore(RedisTemplate<String, String> redisTemplate, ObjectMapper objectMapper,
+                              @Value("${store.conversation.local-cache.max-capacity:1000}") int maxCapacity,
+                              @Value("${store.conversation.local-cache.ttl-minutes:30}") int ttlMinutes) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
+        this.localCache = new LocalCache<>(maxCapacity, ttlMinutes, TimeUnit.MINUTES);
     }
 
     /**
@@ -99,7 +102,13 @@ public class ConversationStore {
                 log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
             }
             ConversationState local = localCache.get(conversationId);
-            return local != null ? local : new ConversationState();
+            if (local != null) {
+                return local;
+            }
+            // 缓存 miss 或已过期，返回空状态
+            ConversationState fresh = new ConversationState();
+            localCache.put(conversationId, fresh);
+            return fresh;
         } catch (JsonProcessingException e) {
             log.warn("会话反序列化失败: conversationId={}", conversationId, e);
             return new ConversationState();
@@ -129,6 +138,13 @@ public class ConversationStore {
             }
             localCache.put(conversationId, state);
         }
+    }
+
+    /**
+     * 清除本地缓存中指定会话（用在显式关闭会话时）
+     */
+    public void removeLocal(String conversationId) {
+        localCache.remove(conversationId);
     }
 
     /**

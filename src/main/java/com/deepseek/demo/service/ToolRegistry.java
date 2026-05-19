@@ -189,7 +189,7 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
      */
      public List<Map<String, Object>> toJsonSchema(List<ToolMeta> toolMetas) {
         if (toolMetas == null || toolMetas.isEmpty()) {
-            return Collections.emptyList();
+            return new ArrayList<>();
         }
         List<Map<String, Object>> schemas = new ArrayList<>(toolMetas.size());
         for (ToolMeta meta : toolMetas) {

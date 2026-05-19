@@ -9,10 +9,10 @@ import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
+import org.springframework.beans.factory.annotation.Value;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -38,15 +38,18 @@ public class ConfirmationStore {
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
 
-    /** Redis 不可用时的本地缓存降级 */
-    private final ConcurrentHashMap<String, ConfirmationState> localCache = new ConcurrentHashMap<>();
+    /** Redis 不可用时的本地缓存降级（TTL + 容量上限） */
+    private final LocalCache<String, ConfirmationState> localCache;
 
     /** Redis 是否处于降级模式 */
     private volatile boolean redisDegraded = false;
 
-    public ConfirmationStore(StringRedisTemplate redisTemplate, ObjectMapper objectMapper) {
+    public ConfirmationStore(StringRedisTemplate redisTemplate, ObjectMapper objectMapper,
+                              @Value("${store.confirmation.local-cache.max-capacity:500}") int maxCapacity,
+                              @Value("${store.confirmation.local-cache.ttl-minutes:5}") int ttlMinutes) {
         this.redisTemplate = redisTemplate;
         this.objectMapper = objectMapper;
+        this.localCache = new LocalCache<>(maxCapacity, ttlMinutes, TimeUnit.MINUTES);
     }
 
     /**

@@ -114,9 +114,15 @@ public class AgentController {
     public ResponseEntity<AgentResponse> confirm(@RequestBody Map<String, Object> request) {
         String conversationId = (String) request.get("conversation_id");
         String confirmationId = (String) request.get("confirmation_id");
-        boolean confirm = request.get("confirm") instanceof Boolean
-                ? (Boolean) request.get("confirm")
-                : false;
+        Object confirmRaw = request.get("confirm");
+        boolean confirm;
+        if (confirmRaw instanceof Boolean) {
+            confirm = (Boolean) confirmRaw;
+        } else if (confirmRaw instanceof String) {
+            confirm = "true".equalsIgnoreCase((String) confirmRaw);
+        } else {
+            confirm = false;
+        }
         String feedback = (String) request.get("feedback");
 
         if (conversationId == null || confirmationId == null) {

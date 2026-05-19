@@ -134,11 +134,17 @@ public class DeepSeekService {
      */
     public DeepSeekChatResponse chatWithTools(List<Message> messages,
                                                List<Map<String, Object>> tools) {
+        return chatWithTools(messages, tools, "auto");
+    }
+
+    public DeepSeekChatResponse chatWithTools(List<Message> messages,
+                                               List<Map<String, Object>> tools,
+                                               String toolChoice) {
         String url = baseUrl + "/v1/chat/completions";
 
         DeepSeekChatRequest request = new DeepSeekChatRequest(messages);
         request.setTools(tools);
-        request.setToolChoice("auto");
+        request.setToolChoice(toolChoice != null ? toolChoice : "auto");
 
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
@@ -152,8 +158,17 @@ public class DeepSeekService {
         while (attempt < maxAttempts) {
             attempt++;
             try {
-                log.debug("调用 DeepSeek API(带 tools): url={}, toolsCount={}, attempt={}/{}",
-                        url, tools != null ? tools.size() : 0, attempt, maxAttempts);
+                log.info("调用 DeepSeek API(带 tools): url={}, toolsCount={}, toolChoice={}, attempt={}/{}",
+                        url, tools != null ? tools.size() : 0, request.getToolChoice(), attempt, maxAttempts);
+
+                if (log.isDebugEnabled()) {
+                    try {
+                        String requestJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(request);
+                        log.debug("DeepSeek API 请求体:\n{}", requestJson);
+                    } catch (Exception je) {
+                        log.debug("请求体序列化失败", je);
+                    }
+                }
 
                 long start = System.currentTimeMillis();
                 ResponseEntity<DeepSeekChatResponse> response = restTemplate.postForEntity(
@@ -161,12 +176,28 @@ public class DeepSeekService {
                 long elapsed = System.currentTimeMillis() - start;
 
                 DeepSeekChatResponse body = response.getBody();
-                boolean hasToolCalls = body != null && body.getChoices() != null
-                        && !body.getChoices().isEmpty()
-                        && body.getChoices().get(0).getToolCalls() != null;
+                boolean hasToolCalls = false;
+                if (body != null && body.getChoices() != null && !body.getChoices().isEmpty()) {
+                    DeepSeekChatResponse.Choice c = body.getChoices().get(0);
+                    hasToolCalls = c.getToolCalls() != null
+                            || (c.getMessage() != null && c.getMessage().getToolCalls() != null);
+                }
 
                 log.info("DeepSeek API(带 tools)响应: status={}, 耗时={}ms, hasToolCalls={}",
                         response.getStatusCode(), elapsed, hasToolCalls);
+
+                if (log.isDebugEnabled() && body != null) {
+                    try {
+                        String responseJson = objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(body);
+                        log.debug("DeepSeek API 响应体: model={}, finish_reason={}, body={}",
+                                body.getModel(),
+                                body.getChoices() != null && !body.getChoices().isEmpty()
+                                        ? body.getChoices().get(0).getFinishReason() : "N/A",
+                                responseJson);
+                    } catch (Exception je) {
+                        log.debug("DeepSeek API 响应体序列化失败", je);
+                    }
+                }
 
                 return body;
 
@@ -182,7 +213,8 @@ public class DeepSeekService {
                     log.error("DeepSeek API 鉴权失败(401)");
                     throw new RuntimeException("API 认证失败");
                 }
-                log.error("DeepSeek API HTTP 错误: status={}", e.getRawStatusCode());
+                String responseBody = e.getResponseBodyAsString();
+                log.error("DeepSeek API HTTP 错误: status={}, body={}", e.getRawStatusCode(), responseBody);
                 if (attempt < maxAttempts) continue;
                 throw new RuntimeException("服务异常");
 

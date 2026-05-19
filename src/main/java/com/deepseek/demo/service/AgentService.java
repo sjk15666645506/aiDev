@@ -34,6 +34,17 @@ public class AgentService {
     /** ReAct 循环最大迭代次数，防止无限循环 */
     private static final int MAX_ITERATIONS = 10;
 
+    /** 领域关键词 → 工具名称 映射（LLM 不调用工具时自动匹配） */
+    private static final Map<String[], String> TOOL_KEYWORDS = new HashMap<>();
+    static {
+        TOOL_KEYWORDS.put(new String[]{"FINANCE", "热门", "行情", "涨跌", "推荐", "好股票", "牛股"}, "query_hot_stocks");
+        TOOL_KEYWORDS.put(new String[]{"FINANCE", "持仓", "持有", "市值", "我的股票", "账户"}, "query_portfolio");
+        TOOL_KEYWORDS.put(new String[]{"FINANCE", "交易记录", "历史", "买卖记录"}, "query_trade_history");
+        TOOL_KEYWORDS.put(new String[]{"FINANCE", "净值", "估值", "价格", "代码"}, "query_stock_nav");
+        TOOL_KEYWORDS.put(new String[]{"FINANCE", "买入", "购买", "建仓"}, "buy_stock");
+        TOOL_KEYWORDS.put(new String[]{"FINANCE", "卖出", "清仓"}, "sell_stock");
+    }
+
     private final DeepSeekService deepSeekService;
     private final ToolRegistry toolRegistry;
     private final ConversationStore conversationStore;
@@ -92,7 +103,7 @@ public class AgentService {
             log.info("意图分类结果: domain={}", domain);
 
             // 3. Layer 2: 工具召回 → 只携带相关工具
-            List<ToolMeta> selectedTools = toolRetriever.retrieve(userMessage, domain, 5);
+            List<ToolMeta> selectedTools = toolRetriever.retrieve(userMessage, domain, 20);
             log.info("工具召回结果: count={}, tools={}",
                     selectedTools.size(),
                     selectedTools.stream().map(ToolMeta::getName).collect(Collectors.toList()));
@@ -101,8 +112,9 @@ public class AgentService {
             List<Message> messages = conversationStore.getMessages(conversationId);
             if (messages.isEmpty()) {
                 messages.add(new Message("system", buildSystemPrompt(knowledgeContext)));
-                messages.add(new Message("user", userMessage));
             }
+
+            messages.add(new Message("user", userMessage));
 
             // 5. 生成 filtered tool schemas 并保存到会话存储
             List<Map<String, Object>> toolSchemas = toolRegistry.toJsonSchema(selectedTools);
@@ -188,7 +200,10 @@ public class AgentService {
                 messages.add(new Message("user",
                         "操作计划已确认，但请按以下调整后执行: " + feedback));
             } else {
-                // 直接批准 → 注入已批准计划，要求 LLM 严格按计划执行
+                // 直接批准 → 先移除 orphaned assistant(tool_calls) 避免违反
+                // "assistant(tool_calls) 后必须跟 tool 响应" 的 API 约束
+                removeLastAssistantMessage(messages);
+                // 注入已批准计划，要求 LLM 严格按计划执行
                 messages.add(new Message("system",
                         "用户已确认操作计划。请严格按以下计划逐项执行，不得增删改操作。\n" +
                         "已批准的计划:\n" + formatPlan(cp.getPlanToolCalls())));
@@ -298,7 +313,7 @@ public class AgentService {
      * <p>
      * 循环调用 DeepSeek API（带 tools），根据返回结果决定下一步：
      * <ul>
-     *   <li>无 tool_calls → 返回最终回答</li>
+     *   <li>无 tool_calls → 自动匹配工具或返回最终回答</li>
      *   <li>有 tool_calls + 未确认计划 → 创建计划确认点</li>
      *   <li>有 tool_calls + 已确认 → 逐个执行（含 CapabilityGuard 校验）</li>
      * </ul>
@@ -312,12 +327,20 @@ public class AgentService {
                                      List<Map<String, Object>> toolSchemas) {
         boolean planConfirmed = conversationStore.getPlanConfirmed(conversationId);
 
+        // 记录本轮携带的工具
+        if (toolSchemas != null && !toolSchemas.isEmpty()) {
+            List<String> toolNames = toolSchemas.stream()
+                    .map(s -> { Object fn = s.get("function"); return fn instanceof Map ? (String)((Map<?,?>)fn).get("name") : "?"; })
+                    .collect(Collectors.toList());
+            log.info("ReAct 循环启动，携带工具: {}", toolNames);
+        }
+
         for (int i = 0; i < MAX_ITERATIONS; i++) {
             conversationStore.saveCheckpoint(conversationId, messages, i);
 
             DeepSeekChatResponse response;
             try {
-                response = deepSeekService.chatWithTools(messages, toolSchemas);
+                response = deepSeekService.chatWithTools(messages, toolSchemas, "auto");
             } catch (Exception e) {
                 log.error("DeepSeek API 调用失败(第{}轮)", i, e);
                 return AgentResponse.error(AgentFallback.apiUnavailable());
@@ -329,14 +352,52 @@ public class AgentService {
                 return AgentResponse.error(AgentFallback.modelResponseInvalid());
             }
 
-            Message responseMessage = response.getChoices().get(0).getMessage();
-            List<ToolCall> toolCalls = response.getChoices().get(0).getToolCalls();
+            DeepSeekChatResponse.Choice choice = response.getChoices().get(0);
+            Message responseMessage = choice.getMessage();
+            // DeepSeek V4 将 tool_calls 放在 message 内部，choice 级别可能为空
+            List<ToolCall> toolCalls = choice.getToolCalls();
+            if ((toolCalls == null || toolCalls.isEmpty()) && responseMessage.getToolCalls() != null) {
+                toolCalls = responseMessage.getToolCalls();
+            }
+            // DeepSeek V4: reasoning_content 可能在 choice 级别或 message 内部
+            if (choice.getReasoningContent() != null) {
+                responseMessage.setReasoningContent(choice.getReasoningContent());
+            }
+            // V4-Pro: reasoning_content 也可能在 message.reasoning_content 中
+            // Jackson 已通过 @JsonProperty 自动反序列化到此字段
             messages.add(responseMessage);
 
             if (toolCalls == null || toolCalls.isEmpty()) {
-                conversationStore.clearCheckpoint(conversationId);
-                String content = responseMessage.getContent();
-                return AgentResponse.done(content != null ? content : "");
+                // 首轮 LLM 未调用工具 → 尝试自动匹配工具（绕过 DeepSeek 不可靠的 tool_choice）
+                if (i == 0 && toolSchemas != null && !toolSchemas.isEmpty()) {
+                    ToolCall matched = autoMatchTool(messages, toolSchemas);
+                    if (matched != null) {
+                        log.info("LLM 未调用工具，自动匹配执行: {}", matched.getFunction().getName());
+                        // 移除空 assistant 消息，注入 tool_calls 继续流程
+                        messages.remove(messages.size() - 1);
+                        if (!planConfirmed) {
+                            return createPlanConfirmation(conversationId, messages, List.of(matched));
+                        }
+                        // plan 已确认 → 直接执行
+                        // 注入 assistant(tool_calls) 消息，使后续 tool 角色消息有合法前驱
+                        List<ToolCall> matchedCalls = List.of(matched);
+                        Message assistantWithToolCalls = new Message("assistant", null);
+                        assistantWithToolCalls.setToolCalls(matchedCalls);
+                        messages.add(assistantWithToolCalls);
+                        toolCalls = matchedCalls;
+                        // fall through to 工具执行逻辑
+                    } else {
+                        conversationStore.clearCheckpoint(conversationId);
+                        String content = responseMessage.getContent();
+                        log.info("LLM 未调用工具且无自动匹配: {}", content != null ? truncate(content, 80) : "空");
+                        return AgentResponse.done(content != null ? content : "");
+                    }
+                } else {
+                    conversationStore.clearCheckpoint(conversationId);
+                    String content = responseMessage.getContent();
+                    log.info("LLM 未调用工具，直接返回文本: {}", content != null ? truncate(content, 80) : "空");
+                    return AgentResponse.done(content != null ? content : "");
+                }
             }
 
             if (!planConfirmed) {
@@ -551,15 +612,17 @@ public class AgentService {
      */
     private String buildSystemPrompt(String context) {
         if (context == null || context.isEmpty()) {
-            return "你是一个智能助手，请根据你的知识回答用户的问题。"
-                    + "你可以调用可用的工具来帮助用户完成操作。"
-                    + "如果需要执行多个操作，请一次性列出所有操作。"
-                    + "请用中文回答。";
+            return "你是一个智能助手，必须遵循以下原则：\n"
+                    + "1. 当有可用工具时，必须调用工具来获取实时数据或执行操作，不能仅凭知识回答\n"
+                    + "2. 如果需要执行多个操作，请一次性列出所有操作\n"
+                    + "3. 工具执行完成后，根据结果回复用户并询问是否需要进一步操作\n"
+                    + "4. 请用中文回答";
         }
-        return "你是一个智能知识库助手。请基于以下参考内容回答用户的问题。"
-                + "你可以调用可用的工具来帮助用户完成操作。"
-                + "如果需要执行多个操作，请一次性列出所有操作。"
-                + "请用中文回答。\n\n参考内容：\n" + context;
+        return "你是一个智能知识库助手。必须遵循以下原则：\n"
+                + "1. 当有可用工具时，必须调用工具来获取实时数据或执行操作，不能仅凭知识回答\n"
+                + "2. 如果需要执行多个操作，请一次性列出所有操作\n"
+                + "3. 工具执行完成后，根据结果回复用户并询问是否需要进一步操作\n"
+                + "4. 请用中文回答\n\n参考内容：\n" + context;
     }
 
     /**
@@ -619,6 +682,48 @@ public class AgentService {
             }
             messages.add(new Message("system", sb.toString()));
         }
+    }
+
+    /**
+     * 自动匹配工具：当 LLM 未调用任何工具时，根据用户消息关键词匹配最合适的工具。
+     * 仅在首轮且存在可用工具时使用，作为 tool_choice 不可靠的降级方案。
+     */
+    private ToolCall autoMatchTool(List<Message> messages, List<Map<String, Object>> toolSchemas) {
+        String userMsg = null;
+        for (Message msg : messages) {
+            if ("user".equals(msg.getRole()) && msg.getContent() != null) {
+                userMsg = msg.getContent();
+                break;
+            }
+        }
+        if (userMsg == null || userMsg.isBlank()) return null;
+
+        for (Map.Entry<String[], String> entry : TOOL_KEYWORDS.entrySet()) {
+            String[] keywords = entry.getKey();
+            if (keywords.length == 0) continue;
+            String toolName = entry.getValue();
+
+            boolean toolAvailable = toolSchemas.stream().anyMatch(s -> {
+                Object fn = s.get("function");
+                String name = fn instanceof Map ? (String) ((Map<?, ?>) fn).get("name") : null;
+                return toolName.equals(name);
+            });
+            if (!toolAvailable) continue;
+
+            boolean anyMatch = false;
+            for (int k = 1; k < keywords.length; k++) {
+                if (userMsg.contains(keywords[k])) {
+                    anyMatch = true;
+                    break;
+                }
+            }
+            if (anyMatch) {
+                log.info("自动匹配工具: tool={}, userMsg={}", toolName, truncate(userMsg, 50));
+                return new ToolCall(UUID.randomUUID().toString(), "function",
+                        new FunctionCall(toolName, "{}"));
+            }
+        }
+        return null;
     }
 
     private String truncate(String s, int maxLen) {

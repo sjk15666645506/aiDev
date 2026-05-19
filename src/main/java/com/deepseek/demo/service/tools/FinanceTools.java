@@ -171,6 +171,44 @@ public class FinanceTools {
     }
 
     /**
+     * 查询市场热门股票。
+     *
+     * @param market 市场类型：A股、港股、美股（可选，默认 A股）
+     * @return 热门股票列表
+     */
+    @Tool(name = "query_hot_stocks",
+          description = "查询当前市场热门/行情较好的股票列表，包含股票名称、代码、最新价格和涨跌幅。当用户询问'热门股票''行情''哪些股票好''推荐股票'时使用此工具",
+          domain = ToolDomain.FINANCE,
+          capabilities = {"finance:query"},
+          parameters = {
+              @ToolParam(name = "market", type = "string",
+                         description = "市场类型，可选值：A股、港股、美股，默认为A股")
+          },
+          action = ActionType.READ)
+    public String queryHotStocks(String market) {
+        String mkt = (market != null && !market.isBlank()) ? market : "A股";
+        log.info("查询热门股票: market={}", mkt);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("🔥 ").append(mkt).append("热门股票 TOP 5\n");
+        sb.append("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
+
+        for (int i = 0; i < 5; i++) {
+            String name = STOCK_NAMES[RANDOM.nextInt(STOCK_NAMES.length)];
+            double price = 10 + RANDOM.nextDouble() * 200;
+            double change = (RANDOM.nextDouble() - 0.2) * 10;
+            String sign = change >= 0 ? "+" : "";
+            String trend = change >= 0 ? "📈" : "📉";
+
+            sb.append(String.format("%d. %s  %s\n", i + 1, trend, name));
+            sb.append(String.format("   最新价 %.2f 元  涨跌幅 %s%.2f%%\n", price, sign, change));
+        }
+
+        log.info("查询热门股票完成: market={}", mkt);
+        return sb.toString();
+    }
+
+    /**
      * 查询近期交易记录。
      *
      * @return 交易记录列表

@@ -99,12 +99,10 @@ public class ToolRetriever {
             }
         }
 
-        // 如果还不够，从该领域按注册顺序补全
-        if (selected.size() < topK) {
-            for (ToolMeta meta : candidates) {
-                if (selected.size() >= topK) break;
-                selected.add(meta.getName());
-            }
+        // 始终补充该领域所有工具（领域已由 DomainRouter 缩小范围）
+        // 确保新注册或低 Embedding 分数的工具不被排除
+        for (ToolMeta meta : candidates) {
+            selected.add(meta.getName());
         }
 
         List<ToolMeta> result = selected.stream()

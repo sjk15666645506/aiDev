@@ -21,6 +21,14 @@ public class Message {
     private String content;
 
     /**
+     * assistant 角色专用：DeepSeek V4 推理内容。
+     * V4 的 thinking mode 强制要求此字段在后续请求中原样传回，
+     * 否则返回 HTTP 400 "reasoning_content must be passed back"。
+     */
+    @JsonProperty("reasoning_content")
+    private String reasoningContent;
+
+    /**
      * assistant 角色专用：LLM 发起的工具调用列表。
      * 当 LLM 决定调用函数时，此字段非空，content 可能为 null。
      */
@@ -63,6 +71,8 @@ public class Message {
     public void setRole(String role) { this.role = role; }
     public String getContent() { return content; }
     public void setContent(String content) { this.content = content; }
+    public String getReasoningContent() { return reasoningContent; }
+    public void setReasoningContent(String reasoningContent) { this.reasoningContent = reasoningContent; }
     public List<ToolCall> getToolCalls() { return toolCalls; }
     public void setToolCalls(List<ToolCall> toolCalls) { this.toolCalls = toolCalls; }
     public String getToolCallId() { return toolCallId; }

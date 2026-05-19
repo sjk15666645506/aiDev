@@ -101,8 +101,15 @@ public class SubAgent {
                 break;
             }
 
-            Message responseMessage = response.getChoices().get(0).getMessage();
-            List<ToolCall> toolCalls = response.getChoices().get(0).getToolCalls();
+            DeepSeekChatResponse.Choice choice = response.getChoices().get(0);
+            Message responseMessage = choice.getMessage();
+            List<ToolCall> toolCalls = choice.getToolCalls();
+            if ((toolCalls == null || toolCalls.isEmpty()) && responseMessage.getToolCalls() != null) {
+                toolCalls = responseMessage.getToolCalls();
+            }
+            if (choice.getReasoningContent() != null) {
+                responseMessage.setReasoningContent(choice.getReasoningContent());
+            }
             messages.add(responseMessage);
 
             // 无 tool_calls → 返回最终回答

@@ -85,7 +85,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
 
         AgentResponse result = agentService.chat("conv-1", "你好");
@@ -111,7 +111,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
 
         ToolMeta queryMeta = mock(ToolMeta.class);
@@ -139,7 +139,7 @@ class AgentServiceTest {
         when(vectorService.searchDocsWithFullContent(anyString(), anyInt()))
                 .thenReturn(new ArrayList<>());
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenThrow(new RuntimeException("API 调用失败"));
 
         AgentResponse result = agentService.chat("conv-3", "查一下");
@@ -213,7 +213,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
         when(toolRegistry.toJsonSchema()).thenReturn(new ArrayList<>());
 
@@ -250,7 +250,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
         when(toolRegistry.toJsonSchema()).thenReturn(new ArrayList<>());
 
@@ -289,7 +289,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
         when(toolRegistry.toJsonSchema()).thenReturn(new ArrayList<>());
 
@@ -345,7 +345,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
         when(toolRegistry.toJsonSchema()).thenReturn(new ArrayList<>());
 
@@ -380,7 +380,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
         when(toolRegistry.toJsonSchema()).thenReturn(new ArrayList<>());
 
@@ -421,7 +421,7 @@ class AgentServiceTest {
         DeepSeekChatResponse response = new DeepSeekChatResponse();
         response.setChoices(List.of(choice));
 
-        when(deepSeekService.chatWithTools(anyList(), anyList()))
+        when(deepSeekService.chatWithTools(anyList(), anyList(), anyString()))
                 .thenReturn(response);
         when(toolRegistry.toJsonSchema()).thenReturn(new ArrayList<>());
 

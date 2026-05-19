@@ -11,7 +11,7 @@ public class DeepSeekChatRequest {
     /**
      * LLM 模型名称，默认 deepseek-chat
      */
-    private String model = "deepseek-chat";
+    private String model = "deepseek-v4-flash";
 
     /**
      * 消息列表（system/user/assistant 角色）

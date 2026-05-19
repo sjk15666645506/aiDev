@@ -103,6 +103,13 @@ public class DeepSeekChatResponse {
         @JsonProperty("tool_calls")
         private List<ToolCall> toolCalls;
 
+        /**
+         * DeepSeek V4 推理内容（thinking mode）。
+         * 在非流式响应中位于 choice 级别，需传递回后续请求。
+         */
+        @JsonProperty("reasoning_content")
+        private String reasoningContent;
+
         public int getIndex() {
             return index;
         }
@@ -133,6 +140,14 @@ public class DeepSeekChatResponse {
 
         public void setToolCalls(List<ToolCall> toolCalls) {
             this.toolCalls = toolCalls;
+        }
+
+        public String getReasoningContent() {
+            return reasoningContent;
+        }
+
+        public void setReasoningContent(String reasoningContent) {
+            this.reasoningContent = reasoningContent;
         }
     }
 

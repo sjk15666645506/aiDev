@@ -5,6 +5,7 @@ import com.deepseek.demo.annotation.Tool;
 import com.deepseek.demo.annotation.ToolDomain;
 import com.deepseek.demo.annotation.ToolParam;
 import com.deepseek.demo.dto.ToolCall;
+import com.deepseek.demo.util.StringUtils;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -17,6 +18,7 @@ import org.springframework.stereotype.Component;
 
 import java.lang.reflect.Method;
 import java.util.*;
+import javax.annotation.PreDestroy;
 import java.util.concurrent.*;
 import java.util.stream.Collectors;
 
@@ -28,7 +30,7 @@ import java.util.stream.Collectors;
  * 白名单校验以及工具执行能力。
  */
 @Component
-public class ToolRegistry implements ApplicationContextAware, ApplicationListener<ContextRefreshedEvent> {
+public class ToolRegistry implements IToolRegistry, ApplicationContextAware, ApplicationListener<ContextRefreshedEvent> {
 
     private static final Logger log = LoggerFactory.getLogger(ToolRegistry.class);
 
@@ -55,6 +57,9 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
 
     /** 指数退避初始延迟（毫秒） */
     private final long backoffInitialMs;
+
+    /** 工具执行线程池（共享，避免每次调用创建新线程） */
+    private final ExecutorService toolExecutor = Executors.newCachedThreadPool();
 
     /**
      * 构造 ToolRegistry
@@ -294,7 +299,7 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
     public String execute(ToolCall toolCall) {
         String toolName = toolCall.getFunction().getName();
         log.info("执行工具: name={}, arguments={}", toolName,
-                truncate(toolCall.getFunction().getArguments(), 100));
+                StringUtils.truncate(toolCall.getFunction().getArguments(), 100));
 
         ToolMeta meta = getTool(toolName);
 
@@ -317,7 +322,7 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
 
         // 执行（带超时重试）
         String result = executeWithRetry(meta, methodArgs, toolName);
-        log.info("工具执行成功: name={}, result={}", toolName, truncate(result, 100));
+        log.info("工具执行成功: name={}, result={}", toolName, StringUtils.truncate(result, 100));
         return result;
     }
 
@@ -352,9 +357,8 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
             }
 
             attempt++;
-            ExecutorService executor = Executors.newSingleThreadExecutor();
             try {
-                Future<Object> future = executor.submit(() ->
+                Future<Object> future = toolExecutor.submit(() ->
                         meta.getMethod().invoke(meta.getBean(), methodArgs));
                 Object result = future.get(defaultTimeoutSeconds, TimeUnit.SECONDS);
                 return result != null ? result.toString() : "";
@@ -371,8 +375,6 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
                 Thread.currentThread().interrupt();
                 log.error("工具执行被中断: name={}", toolName);
                 throw new RuntimeException("工具执行被中断: " + toolName);
-            } finally {
-                executor.shutdown();
             }
         }
 
@@ -380,9 +382,8 @@ public class ToolRegistry implements ApplicationContextAware, ApplicationListene
         throw new RuntimeException("工具执行超时(已重试" + maxRetries + "次): " + toolName);
     }
 
-    /** 截断长文本用于日志输出 */
-    private String truncate(String s, int maxLen) {
-        if (s == null) return null;
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
+    @PreDestroy
+    public void shutdown() {
+        toolExecutor.shutdown();
     }
 }

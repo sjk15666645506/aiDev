@@ -1,8 +1,9 @@
 package com.deepseek.demo.controller;
 
-import com.deepseek.demo.service.DeepSeekService;
+import com.deepseek.demo.util.StringUtils;
+import com.deepseek.demo.service.ILlmService;
+import com.deepseek.demo.service.IVectorSearchService;
 import com.deepseek.demo.service.GeneralRagService;
-import com.deepseek.demo.service.VectorService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -23,9 +24,9 @@ public class DeepSeekController {
 
     private static final Logger log = LoggerFactory.getLogger(DeepSeekController.class);
 
-    private final DeepSeekService deepSeekService;
+    private final ILlmService deepSeekService;
     private final GeneralRagService generalRagService;
-    private final VectorService vectorService;
+    private final IVectorSearchService vectorService;
     private final ObjectMapper objectMapper;
 
     /**
@@ -36,8 +37,8 @@ public class DeepSeekController {
      * @param vectorService     向量检索服务
      * @param objectMapper      JSON 序列化/反序列化
      */
-    public DeepSeekController(DeepSeekService deepSeekService,
-                              GeneralRagService generalRagService, VectorService vectorService,
+    public DeepSeekController(ILlmService deepSeekService,
+                              GeneralRagService generalRagService, IVectorSearchService vectorService,
                               ObjectMapper objectMapper) {
         this.deepSeekService = deepSeekService;
         this.generalRagService = generalRagService;
@@ -54,7 +55,7 @@ public class DeepSeekController {
     public Map<String, Object> chat(@RequestBody Map<String, String> request) {
         /** 用户消息内容 */
         String message = request.get("message");
-        log.info("收到非流式请求: message={}", truncate(message, 50));
+        log.info("收到非流式请求: message={}", StringUtils.truncate(message, 50));
         String reply = deepSeekService.chat(message);
         log.info("非流式响应返回");
         Map<String, Object> result = new HashMap<>();
@@ -74,7 +75,7 @@ public class DeepSeekController {
         /** 用户消息内容 */
         String message = request.get("message");
         log.info("收到非流式请求(带系统提示): system={}, message={}",
-                truncate(system, 30), truncate(message, 50));
+                StringUtils.truncate(system, 30), StringUtils.truncate(message, 50));
         String reply = deepSeekService.chatWithSystem(system, message);
         log.info("非流式响应返回");
         Map<String, Object> result = new HashMap<>();
@@ -91,7 +92,7 @@ public class DeepSeekController {
     public ResponseEntity<StreamingResponseBody> chatStream(@RequestBody Map<String, String> request) {
         /** 用户消息内容 */
         String message = request.get("message");
-        log.info("收到流式请求: message={}", truncate(message, 50));
+        log.info("收到流式请求: message={}", StringUtils.truncate(message, 50));
 
         StreamingResponseBody body = outputStream -> {
             try {
@@ -124,7 +125,7 @@ public class DeepSeekController {
         /** 用户消息内容 */
         String message = request.get("message");
         log.info("收到流式请求(带系统提示): system={}, message={}",
-                truncate(system, 30), truncate(message, 50));
+                StringUtils.truncate(system, 30), StringUtils.truncate(message, 50));
 
         StreamingResponseBody body = outputStream -> {
             try {
@@ -156,7 +157,7 @@ public class DeepSeekController {
         String question = (String) request.get("question");
         /** 返回结果条数，默认 5 */
         int limit = request.containsKey("limit") ? (int) request.get("limit") : 5;
-        log.info("收到知识库搜索请求: question={}, limit={}", truncate(question, 50), limit);
+        log.info("收到知识库搜索请求: question={}, limit={}", StringUtils.truncate(question, 50), limit);
 
         List<Map<String, Object>> rawResults = vectorService.searchDocsWithFullContent(question, limit);
         // 合并同文件的 chunks，只保留 text 和 file_name
@@ -192,7 +193,7 @@ public class DeepSeekController {
         String question = (String) request.get("question");
         /** 检索返回的最大结果数，默认 5 */
         int limit = request.containsKey("limit") ? (int) request.get("limit") : 5;
-        log.info("收到知识库请求: question={}, limit={}", truncate(question, 50), limit);
+        log.info("收到知识库请求: question={}, limit={}", StringUtils.truncate(question, 50), limit);
 
         String reply = generalRagService.ragChat(question, limit);
         Map<String, Object> result = new HashMap<>();
@@ -211,7 +212,7 @@ public class DeepSeekController {
         String question = (String) request.get("question");
         /** 检索返回的最大结果数，默认 5 */
         int limit = request.containsKey("limit") ? (int) request.get("limit") : 5;
-        log.info("收到知识库流式请求: question={}, limit={}", truncate(question, 50), limit);
+        log.info("收到知识库流式请求: question={}, limit={}", StringUtils.truncate(question, 50), limit);
 
         StreamingResponseBody body = outputStream -> {
             try {
@@ -254,12 +255,6 @@ public class DeepSeekController {
         outputStream.write(objectMapper.writeValueAsBytes(done));
         outputStream.write('\n');
         outputStream.flush();
-    }
-
-    /** 截断长文本用于日志输出 */
-    private String truncate(String s, int maxLen) {
-        if (s == null) return null;
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
     }
 
     /**

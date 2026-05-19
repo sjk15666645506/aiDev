@@ -1,6 +1,7 @@
 package com.deepseek.demo.service;
 
 import com.deepseek.demo.annotation.ToolDomain;
+import com.deepseek.demo.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
@@ -21,18 +22,18 @@ public class ToolRetriever {
 
     private static final Logger log = LoggerFactory.getLogger(ToolRetriever.class);
 
-    private final ToolRegistry toolRegistry;
+    private final IToolRegistry toolRegistry;
     private final ToolVectorStore vectorStore;
-    private final VectorService vectorService;
+    private final EmbeddingClient embeddingClient;
     private final FrequencyTracker frequencyTracker;
 
-    public ToolRetriever(ToolRegistry toolRegistry,
+    public ToolRetriever(IToolRegistry toolRegistry,
                          ToolVectorStore vectorStore,
-                         VectorService vectorService,
+                         EmbeddingClient embeddingClient,
                          FrequencyTracker frequencyTracker) {
         this.toolRegistry = toolRegistry;
         this.vectorStore = vectorStore;
-        this.vectorService = vectorService;
+        this.embeddingClient = embeddingClient;
         this.frequencyTracker = frequencyTracker;
     }
 
@@ -45,7 +46,7 @@ public class ToolRetriever {
         for (ToolMeta meta : toolRegistry.getAllTools().values()) {
             String text = buildEmbeddingText(meta);
             try {
-                float[] vector = vectorService.embed(text);
+                float[] vector = embeddingClient.embed(text);
                 vectorStore.save(meta.getName(), vector);
             } catch (Exception e) {
                 log.warn("工具 Embedding 失败: name={}, error={}", meta.getName(), e.getMessage());
@@ -69,7 +70,7 @@ public class ToolRetriever {
         // 2. 尝试语义检索
         List<ToolVectorStore.ScoredTool> scored;
         try {
-            float[] queryVector = vectorService.embed(userQuery);
+            float[] queryVector = embeddingClient.embed(userQuery);
             scored = vectorStore.search(queryVector, topK);
         } catch (Exception e) {
             log.warn("语义检索失败，降级为频率排序: {}", e.getMessage());
@@ -111,7 +112,7 @@ public class ToolRetriever {
                 .collect(Collectors.toList());
 
         log.debug("工具召回: domain={}, query={}, candidates={}, selected={}",
-                domain, truncate(userQuery, 30), candidates.size(), result.size());
+                domain, StringUtils.truncate(userQuery, 30), candidates.size(), result.size());
         return result;
     }
 
@@ -136,8 +137,4 @@ public class ToolRetriever {
         }
     }
 
-    private String truncate(String s, int maxLen) {
-        if (s == null) return null;
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
-    }
 }

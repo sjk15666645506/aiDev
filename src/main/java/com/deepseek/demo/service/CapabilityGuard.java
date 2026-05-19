@@ -1,5 +1,6 @@
 package com.deepseek.demo.service;
 
+import com.deepseek.demo.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -46,7 +47,7 @@ public class CapabilityGuard {
         if (!matched) {
             String reason = String.format(
                     "工具 [%s] 的能力 (%s) 与用户请求 \"%s\" 不匹配，可能选错了工具",
-                    tool.getName(), tool.getCapabilities(), truncate(userMessage, 50));
+                    tool.getName(), tool.getCapabilities(), StringUtils.truncate(userMessage, 50));
             log.warn(reason);
             return Result.reject(reason);
         }
@@ -54,10 +55,6 @@ public class CapabilityGuard {
         return Result.pass();
     }
 
-    private String truncate(String s, int maxLen) {
-        if (s == null) return null;
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
-    }
 
     /**
      * 校验结果。

@@ -2,7 +2,7 @@ package com.deepseek.demo.controller;
 
 import com.deepseek.demo.service.FileParser;
 import com.deepseek.demo.service.MeiliSearchService;
-import com.deepseek.demo.service.VectorService;
+import com.deepseek.demo.service.IVectorSearchService;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.*;
@@ -26,7 +26,7 @@ public class KnowledgeController {
     private static final int CHUNK_SIZE_DOCS = 1500;
     private static final int CHUNK_OVERLAP_DOCS = 300;
 
-    private final VectorService vectorService;
+    private final IVectorSearchService vectorService;
     private final FileParser fileParser;
     private final MeiliSearchService meiliSearchService;
 
@@ -34,7 +34,7 @@ public class KnowledgeController {
      * @param vectorService       向量检索服务（写入 Qdrant）
      * @param fileParser          文件解析服务（docx/xlsx 等格式）
      * @param meiliSearchService  Meilisearch 全文搜索服务 */
-    public KnowledgeController(VectorService vectorService, FileParser fileParser,
+    public KnowledgeController(IVectorSearchService vectorService, FileParser fileParser,
                                MeiliSearchService meiliSearchService) {
         this.vectorService = vectorService;
         this.fileParser = fileParser;

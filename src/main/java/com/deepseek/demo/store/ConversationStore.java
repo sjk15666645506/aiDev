@@ -15,6 +15,7 @@ import org.springframework.beans.factory.annotation.Value;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -25,7 +26,7 @@ import java.util.concurrent.TimeUnit;
  * key 格式：{@code conversation:{conversationId}}
  */
 @Component
-public class ConversationStore {
+public class ConversationStore implements IConversationStore {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationStore.class);
 
@@ -43,6 +44,13 @@ public class ConversationStore {
 
     /** Redis 是否处于降级模式 */
     private volatile boolean redisDegraded = false;
+
+    /** 按 conversationId 分锁，防止同一会话的并发 load-modify-save 丢失更新 */
+    private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
+
+    private Object lockFor(String conversationId) {
+        return locks.computeIfAbsent(conversationId, k -> new Object());
+    }
 
     public ConversationStore(RedisTemplate<String, String> redisTemplate, ObjectMapper objectMapper,
                               @Value("${store.conversation.local-cache.max-capacity:1000}") int maxCapacity,
@@ -154,22 +162,22 @@ public class ConversationStore {
      * @return 消息列表，会话不存在时返回空列表
      */
     public List<Message> getMessages(String conversationId) {
-        ConversationState state = load(conversationId);
-        if (state.messages.isEmpty()) {
-            // 首次访问不触发 save（无内容可写），
-            // 仅 touch Redis 以重置 TTL；降级模式下忽略
-            if (!redisDegraded) {
-                try {
-                    redisTemplate.expire(key(conversationId), EXPIRATION_MINUTES, TimeUnit.MINUTES);
-                } catch (RedisConnectionFailureException e) {
-                    redisDegraded = true;
-                    log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            if (state.messages.isEmpty()) {
+                if (!redisDegraded) {
+                    try {
+                        redisTemplate.expire(key(conversationId), EXPIRATION_MINUTES, TimeUnit.MINUTES);
+                    } catch (RedisConnectionFailureException e) {
+                        redisDegraded = true;
+                        log.warn("Redis 连接失败，切换到本地缓存降级模式", e);
+                    }
                 }
+            } else {
+                save(conversationId, state);
             }
-        } else {
-            save(conversationId, state);
+            return state.messages;
         }
-        return state.messages;
     }
 
     /**
@@ -179,9 +187,11 @@ public class ConversationStore {
      * @param messages       要保存的消息列表
      */
     public void saveMessages(String conversationId, List<Message> messages) {
-        ConversationState state = load(conversationId);
-        state.messages = messages;
-        save(conversationId, state);
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            state.messages = messages;
+            save(conversationId, state);
+        }
     }
 
     /**
@@ -192,11 +202,13 @@ public class ConversationStore {
      * @param iteration      当前迭代次数（检查点标识）
      */
     public void saveCheckpoint(String conversationId, List<Message> messages, int iteration) {
-        ConversationState state = load(conversationId);
-        state.messages = messages;
-        state.checkpoint = iteration;
-        save(conversationId, state);
-        log.debug("会话 {} 检查点已保存，迭代次数={}", conversationId, iteration);
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            state.messages = messages;
+            state.checkpoint = iteration;
+            save(conversationId, state);
+            log.debug("会话 {} 检查点已保存，迭代次数={}", conversationId, iteration);
+        }
     }
 
     /**
@@ -205,10 +217,12 @@ public class ConversationStore {
      * @param conversationId 会话 ID
      */
     public void clearCheckpoint(String conversationId) {
-        ConversationState state = load(conversationId);
-        state.checkpoint = 0;
-        save(conversationId, state);
-        log.debug("会话 {} 检查点已清除", conversationId);
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            state.checkpoint = 0;
+            save(conversationId, state);
+            log.debug("会话 {} 检查点已清除", conversationId);
+        }
     }
 
     /**
@@ -230,12 +244,14 @@ public class ConversationStore {
      * @return 设置前的确认状态
      */
     public boolean setPlanConfirmed(String conversationId, boolean confirmed) {
-        ConversationState state = load(conversationId);
-        boolean previous = state.planConfirmed;
-        state.planConfirmed = confirmed;
-        save(conversationId, state);
-        log.debug("会话 {} 计划确认状态已更新：{} -> {}", conversationId, previous, confirmed);
-        return previous;
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            boolean previous = state.planConfirmed;
+            state.planConfirmed = confirmed;
+            save(conversationId, state);
+            log.debug("会话 {} 计划确认状态已更新：{} -> {}", conversationId, previous, confirmed);
+            return previous;
+        }
     }
 
     /**
@@ -257,10 +273,12 @@ public class ConversationStore {
      * @param plan           审批的计划对象
      */
     public void setApprovedPlan(String conversationId, List<Map<String, Object>> plan) {
-        ConversationState state = load(conversationId);
-        state.approvedPlan = plan;
-        save(conversationId, state);
-        log.debug("会话 {} 审批计划已保存", conversationId);
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            state.approvedPlan = plan;
+            save(conversationId, state);
+            log.debug("会话 {} 审批计划已保存", conversationId);
+        }
     }
 
     @SuppressWarnings("unchecked")
@@ -270,9 +288,11 @@ public class ConversationStore {
     }
 
     public void setSelectedToolSchemas(String conversationId, List<Map<String, Object>> schemas) {
-        ConversationState state = load(conversationId);
-        state.selectedToolSchemas = schemas;
-        save(conversationId, state);
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            state.selectedToolSchemas = schemas;
+            save(conversationId, state);
+        }
     }
 
     /**
@@ -293,8 +313,10 @@ public class ConversationStore {
      * @param traceId        追踪 ID
      */
     public void setTraceId(String conversationId, String traceId) {
-        ConversationState state = load(conversationId);
-        state.traceId = traceId;
-        save(conversationId, state);
+        synchronized (lockFor(conversationId)) {
+            ConversationState state = load(conversationId);
+            state.traceId = traceId;
+            save(conversationId, state);
+        }
     }
 }

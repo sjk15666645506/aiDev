@@ -19,9 +19,9 @@ public class DomainRouter {
 
     private static final Logger log = LoggerFactory.getLogger(DomainRouter.class);
 
-    private final DeepSeekService deepSeekService;
+    private final ILlmService deepSeekService;
 
-    public DomainRouter(DeepSeekService deepSeekService) {
+    public DomainRouter(ILlmService deepSeekService) {
         this.deepSeekService = deepSeekService;
     }
 

@@ -3,6 +3,7 @@ package com.deepseek.demo.service;
 import com.deepseek.demo.dto.DeepSeekChatRequest;
 import com.deepseek.demo.dto.DeepSeekChatResponse;
 import com.deepseek.demo.dto.Message;
+import com.deepseek.demo.util.StringUtils;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.slf4j.Logger;
@@ -22,7 +23,7 @@ import java.util.Map;
 import java.util.function.Consumer;
 
 @Service
-public class DeepSeekService {
+public class DeepSeekService implements ILlmService {
 
     private static final Logger log = LoggerFactory.getLogger(DeepSeekService.class);
 
@@ -59,9 +60,9 @@ public class DeepSeekService {
      * @return LLM 回复文本
      */
     public String chat(String userMessage) {
-        log.info("非流式请求: message={}", truncate(userMessage, 50));
+        log.info("非流式请求: message={}", StringUtils.truncate(userMessage, 50));
         DeepSeekChatRequest request = new DeepSeekChatRequest();
-        request.setMessages(Arrays.asList(new Message("user", userMessage)));
+        request.setMessages(Arrays.asList(new Message(Message.ROLE_USER, userMessage)));
         DeepSeekChatResponse response = chat(request);
         String reply = extractContent(response);
         log.info("非流式响应完成: replyLength={}", reply != null ? reply.length() : 0);
@@ -77,10 +78,10 @@ public class DeepSeekService {
      */
     public String chatWithSystem(String systemPrompt, String userMessage) {
         log.info("非流式请求(带系统提示): system={}, message={}",
-                truncate(systemPrompt, 30), truncate(userMessage, 50));
+                StringUtils.truncate(systemPrompt, 30), StringUtils.truncate(userMessage, 50));
         List<Message> messages = Arrays.asList(
-                new Message("system", systemPrompt),
-                new Message("user", userMessage)
+                new Message(Message.ROLE_SYSTEM, systemPrompt),
+                new Message(Message.ROLE_USER, userMessage)
         );
         DeepSeekChatRequest request = new DeepSeekChatRequest();
         request.setMessages(messages);
@@ -238,10 +239,10 @@ public class DeepSeekService {
         String url = baseUrl + "/v1/chat/completions";
 
         DeepSeekChatRequest request = new DeepSeekChatRequest();
-        request.setMessages(Arrays.asList(new Message("user", userMessage)));
+        request.setMessages(Arrays.asList(new Message(Message.ROLE_USER, userMessage)));
         request.setStream(true);
 
-        log.info("流式请求开始: message={}", truncate(userMessage, 50));
+        log.info("流式请求开始: message={}", StringUtils.truncate(userMessage, 50));
         long start = System.currentTimeMillis();
 
         restTemplate.execute(url, HttpMethod.POST,
@@ -267,7 +268,7 @@ public class DeepSeekService {
                                 if (!content.isMissingNode() && content.isTextual()) {
                                     String text = content.asText();
                                     totalChars += text.length();
-                                    log.debug("流式收到chunk: content={}", truncate(text, 30));
+                                    log.debug("流式收到chunk: content={}", StringUtils.truncate(text, 30));
                                     onContent.accept(text);
                                 }
                             }
@@ -295,9 +296,4 @@ public class DeepSeekService {
         return null;
     }
 
-    /** 截断长文本用于日志输出 */
-    private String truncate(String s, int maxLen) {
-        if (s == null) return null;
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
-    }
 }

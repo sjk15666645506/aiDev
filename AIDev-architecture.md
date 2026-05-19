@@ -124,27 +124,38 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   └── RedisConfig.java               # Redis㉑ 配置 Bean
 │   ├── annotation/                        # Agent㉒ 注解层
 │   │   ├── Tool.java                      # @Tool 注解
+│   │   ├── ToolDomain.java                # @ToolDomain 领域枚举
 │   │   ├── ToolParam.java                 # @ToolParam 注解
 │   │   └── ActionType.java                # 枚举 READ / WRITE㉕
 │   ├── controller/
 │   │   ├── DeepSeekController.java        # 聊天 & 知识库 API
 │   │   ├── KnowledgeController.java       # 文档摄入 & 同步 API
-│   │   └── AgentController.java           # Agent㉒ 对话 & 确认 API
+│   │   ├── AgentController.java           # Agent㉒ 对话 & 确认 API
+│   │   └── GlobalExceptionHandler.java    # 全局异常处理（@RestControllerAdvice）
 │   ├── dto/
 │   │   ├── DeepSeekChatRequest.java       # LLM② 请求体（扩展 tools/tool_choice）
-│   │   ├── DeepSeekChatResponse.java      # LLM 响应体（扩展 tool_calls㉔）
-│   │   ├── Message.java                   # 消息体（扩展 toolCalls/toolCallId/name）
+│   │   ├── DeepSeekChatResponse.java      # LLM 响应体（扩展 tool_calls㉔ + reasoning_content）
+│   │   ├── Message.java                   # 消息体（扩展 toolCalls/toolCallId/name + reasoning_content）
 │   │   ├── ToolCall.java                  # ToolCall㉔ DTO
 │   │   ├── FunctionCall.java              # FunctionCall DTO
 │   │   ├── AgentResponse.java             # Agent 统一响应
 │   │   └── ConfirmationPoint.java         # 确认点㉕ DTO
+│   ├── filter/
+│   │   └── TraceFilter.java               # 全链路 traceId 注入（MDC + X-Trace-Id 响应头）
 │   ├── service/
+│   │   ├── ILlmService.java               # LLM 调用接口（DeepSeekService 实现）
+│   │   ├── IVectorSearchService.java      # 向量检索接口（VectorService 实现）
+│   │   ├── IToolRegistry.java             # 工具注册接口（ToolRegistry 实现）
 │   │   ├── DeepSeekService.java           # DeepSeek LLM 调用（含 chatWithTools）
+│   │   ├── DeepSeekResponseNormalizer.java # V4 响应 tool_calls 位置兼容处理
 │   │   ├── GeneralRagService.java         # 文档 RAG① 编排
-│   │   ├── VectorService.java             # Qdrant⑤ 向量搜索 + 混合检索(RRF⑩)
+│   │   ├── VectorService.java             # 混合检索(RRF⑩) + 上下文扩展（844→260行）
+│   │   ├── QdrantClient.java              # Qdrant⑤ HTTP 通信（从 VectorService 提取）
+│   │   ├── EmbeddingClient.java           # Embedding③ + 缓存（从 VectorService 提取）
 │   │   ├── MeiliSearchService.java        # Meilisearch⑧ 全文搜索
 │   │   ├── FileParser.java                # docx/xlsx 文件解析
-│   │   ├── AgentService.java              # Agent㉒ ReAct㉓ 循环引擎
+│   │   ├── AgentService.java              # Agent㉒ 编排 + 确认回调（733→260行）
+│   │   ├── ReActEngine.java               # ReAct㉓ 循环核心（从 AgentService 提取）
 │   │   ├── AgentFallback.java             # 兜底回复生成（无工具匹配/异常时）
 │   │   ├── DomainRouter.java              # Layer1: 意图→领域分类
 │   │   ├── ToolRegistry.java              # 工具注册中心（注解扫描/反射执行）
@@ -160,10 +171,13 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │       ├── ExternalTools.java         # 外部服务工具集
 │   │       ├── FinanceTools.java          # 金融计算工具集
 │   │       └── MultiAgentTools.java       # 多 Agent 委派工具集
-│   └── store/                             # 持久化层（Redis + 本地缓存降级）
-│       ├── ConversationStore.java         # 会话上下文存储（Redis, TTL 30min）
-│       ├── ConfirmationStore.java         # 确认点存储（Redis, TTL 5min）
-│       └── LocalCache.java                # 本地缓存（TTL + 容量上限逐出）
+│   ├── store/                             # 持久化层（Redis + 本地缓存降级）
+│   │   ├── IConversationStore.java        # 会话存储接口
+│   │   ├── ConversationStore.java         # 会话上下文存储（Redis, TTL 30min, 分conversationId锁）
+│   │   ├── ConfirmationStore.java         # 确认点存储（Redis, TTL 5min）
+│   │   └── LocalCache.java                # 本地缓存（TTL + 容量上限逐出）
+│   └── util/
+│       └── StringUtils.java               # 公共字符串工具（truncate 等）
 ├── src/main/resources/
 │   ├── application.yml                    # 本地配置（${DEEPSEEK_API_KEY}，不写真实 key）
 │   └── application.yml.example            # 配置模板，供新开发者参考
@@ -200,25 +214,44 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 |------|------|------|--------|
 | DeepSeekController | 聊天、RAG①、知识库搜索的 HTTP 入口 | 8081 | Spring Boot |
 | KnowledgeController | 文档摄入、Meilisearch⑧ 同步管理 | 8081 | Spring Boot |
-| DeepSeekService | 调用 DeepSeek LLM② API（非流式 + 流式） | — | RestTemplate⑰ |
+| AgentController | Agent㉒ 对话 & 确认回调 HTTP 入口 | 8081 | Spring Boot |
+| GlobalExceptionHandler | 全局异常 → JSON（@RestControllerAdvice） | — | Spring Boot |
+| TraceFilter | 全链路 traceId 注入（MDC + X-Trace-Id 响应头） | — | OncePerRequestFilter |
+| DeepSeekService | 调用 DeepSeek LLM② API（非流式 + 流式），实现 ILlmService | — | RestTemplate⑰ |
+| DeepSeekResponseNormalizer | V4 响应 tool_calls 位置兼容（choice + message 双层检查） | — | — |
 | GeneralRagService | RAG① 流程编排：检索 → 过滤 → 组装提示 → LLM② | — | — |
-| VectorService | Qdrant⑤ 向量检索 + 混合检索（RRF⑩ 合并） | 16333 | Qdrant HTTP API |
+| VectorService | 混合检索（RRF⑩ 合并）+ 上下文扩展，实现 IVectorSearchService | 16333 | Qdrant + Meilisearch |
+| QdrantClient | Qdrant⑤ HTTP 通信（collection/search/scroll/upsert） | 16333 | Qdrant REST API |
+| EmbeddingClient | Embedding③ + 5min 缓存（从 VectorService 提取） | 11434 | Ollama |
 | MeiliSearchService | Meilisearch⑧ BM25⑨ 全文检索 | 7700 | Meilisearch HTTP API |
 | FileParser | docx/xlsx 文件文本提取 | — | Apache POI |
 | ingest.py | 文件分块⑪、embedding③、双路写入 | — | Ollama⑫ Python SDK |
-| AgentController | Agent㉒ 对话 & 确认回调 HTTP 入口 | 8081 | Spring Boot |
-| AgentService | ReAct㉓ 循环引擎：规划 → 确认 → 执行 → 迭代 | — | DeepSeek API㉔ |
-| ToolRegistry | @Tool 注解扫描、JSON Schema 生成、反射调用 | — | Spring Bean |
+| AgentService | ReAct㉓ 编排 + 确认回调㉕（仅协作调度，733→260行） | — | DeepSeek API㉔ |
+| ReActEngine | ReAct㉓ 循环核心（从 AgentService 提取）：agentLoop + autoMatchTool + 确认点创建 | — | DeepSeek API |
+| ToolRegistry | @Tool 注解扫描、JSON Schema 生成、反射调用，实现 IToolRegistry | — | Spring Bean |
 | DomainRouter | Layer1: 意图→领域分类，轻量 LLM 调用 | — | DeepSeek API |
-| ToolRetriever | Layer2: 领域内语义+频率工具召回 | — | ToolVectorStore + VectorService |
+| ToolRetriever | Layer2: 领域内语义+频率工具召回 | — | EmbeddingClient + ToolVectorStore |
 | CapabilityGuard | Layer3: 执行前能力关键词校验 | — | 规则引擎 |
 | ToolVectorStore | 工具 Embedding 内存向量存储（余弦距离） | — | ConcurrentHashMap |
 | FrequencyTracker | 工具调用频率追踪（时间衰减） | — | ConcurrentHashMap |
-| ConversationStore | 会话上下文 Redis㉑ 存储（降级切 LocalCache） | 6379 | Redis + Jackson |
+| ConversationStore | 会话上下文 Redis㉑ 存储（降级切 LocalCache，分 conversationId 锁），实现 IConversationStore | 6379 | Redis + Jackson |
 | ConfirmationStore | 确认点 Redis㉑ 存储（降级切 LocalCache） | 6379 | Redis + Jackson |
 | LocalCache | 本地缓存：TTL 过期 + 容量上限逐出 | — | ConcurrentHashMap + ScheduledExecutor |
 
-### 3.2 DeepSeekService — LLM 调用
+### 3.2 核心接口抽象
+
+Batch 3 引入 4 个核心接口，所有消费者面向接口编程：
+
+| 接口 | 实现类 | 包 | 核心方法数 |
+|------|--------|-----|------------|
+| `ILlmService` | `DeepSeekService` | service | 6 |
+| `IVectorSearchService` | `VectorService` | service | 6 + 1 静态方法 |
+| `IToolRegistry` | `ToolRegistry` | service | 7 |
+| `IConversationStore` | `ConversationStore` | store | 12 |
+
+`IVectorSearchService` 还承载静态工具方法 `truncateContexts(List, int)` 和常量 `MAX_CONTEXT_CHARS`。
+
+### 3.3 DeepSeekService — LLM 调用
 
 ```
 DeepSeekService
@@ -230,35 +263,40 @@ DeepSeekService
 
 - 请求地址：`${deepseek.base-url}/v1/chat/completions`
 - 鉴权：`Authorization: Bearer ${deepseek.api-key}`
-- 模型：`deepseek-chat`
+- 模型：`deepseek-v4-flash`（2026-07-24 前也可用 `deepseek-chat` 别名）
 - 流式模式：通过 `RestTemplate.execute` 直接读取 HTTP 响应流，逐行解析 `data: ` SSE⑯ 事件
+- **V4 响应解析**：`hasToolCalls` 同时检查 `choice.tool_calls` 和 `message.tool_calls`（V4 将 tool_calls 放在 message 内部）
+- **请求/响应 DEBUG 日志**：logback 级别 `com.deepseek.demo: DEBUG` 时打印完整 JSON
 
-### 3.3 VectorService — 向量检索与混合检索
+### 3.4 VectorService — 向量检索与混合检索
 
-#### 3.3.1 初始化
+实现 `IVectorSearchService` 接口。Batch 2 将 Qdrant HTTP 通信提取为 `QdrantClient`、Embedding + 缓存提取为 `EmbeddingClient`，VectorService 自身专注于混合检索编排（844→260 行）。
 
-`@PostConstruct init()` 在启动时自动检测 Qdrant⑤ collection⑥ 是否存在，不存在则创建（768 维、Cosine⑦ 距离）。
+#### 3.4.1 初始化
 
-#### 3.3.2 Embedding③
+启动时委托 `QdrantClient.init()` 检测 collection 并自动创建（768 维、Cosine⑦ 距离）；`createCollection` 改为直接 PUT + 忽略 409（collection 已存在）。
 
-调用 Ollama⑫ `/api/embed` 接口，使用 `nomic-embed-text⑬` 模型生成 768 维向量④。
+#### 3.4.2 Embedding③
 
-#### 3.3.3 混合检索流程
+委托 `EmbeddingClient.embed(text)` → Ollama⑫ `/api/embed`，nomic-embed-text⑬ 768 维向量④，含 5 分钟 LRU 缓存。
+
+#### 3.4.3 混合检索流程
 
 ```
 searchDocsWithFullContent(question, limit)
   │
   ├── searchHybrid(question, limit*2, docCollection, docVectorName)
   │     │
-  │     ├── searchQdrant()           # Qdrant⑤ 向量④搜索
-  │     │     └── 关键词加权排序        # VECTOR_WEIGHT=0.6
+  │     ├── embeddingClient.embed(question)    # Embedding③ (5min 缓存)
+  │     ├── qdrantClient.search()             # Qdrant⑤ 向量④搜索
+  │     │     └── 关键词加权排序                # VECTOR_WEIGHT=0.6
   │     │
-  │     ├── meiliSearchService.search()  # Meilisearch⑧ BM25⑨ 全文
+  │     ├── meiliSearchService.search()       # Meilisearch⑧ BM25⑨ 全文
   │     │
   │     └── rrfMerge()               # RRF⑩ (k=60) 合并两路结果
   │
   └── 上下文扩展
-        └── scrollWithRange()        # 按文件+chunk⑪范围获取相邻chunk
+        └── qdrantClient.scrollWithRange()    # 按文件+chunk⑪范围获取相邻chunk
 ```
 
 **关键词加权**：从 query 中提取中英文关键词，计算每个结果中关键词的命中比例，按 `0.6 * vector_score + 0.4 * keyword_score` 重排。
@@ -267,14 +305,14 @@ searchDocsWithFullContent(question, limit)
 
 **上下文扩展**：对命中的结果，按文件分组，取匹配 chunk⑪ 前后各 2 个 chunk 拼接到一起，提供更完整的上下文。
 
-### 3.4 MeiliSearchService⑧ — 全文搜索
+### 3.5 MeiliSearchService⑧ — 全文搜索
 
 封装 Meilisearch REST API 的搜索调用：
 - `search(index, query, limit)` → `POST /indexes/{index}/search`
 - 返回结构与 VectorService 的 `parseSearchResults` 兼容
 - 搜索失败时返回空列表（非致命降级）
 
-### 3.5 GeneralRagService① — RAG 编排
+### 3.6 GeneralRagService① — RAG 编排
 
 ```
 ragChat(question, limit)
@@ -290,7 +328,7 @@ ragChat(question, limit)
 - 上下文截断 12000 字符（约 6000 tokens⑭），控制送入 LLM② 的知识量
 - 空上下文降级为纯 LLM 回答
 
-### 3.6 FileParser — 文件解析
+### 3.7 FileParser — 文件解析
 
 | 格式 | 解析方式 | 依赖 |
 |------|----------|------|
@@ -298,7 +336,7 @@ ragChat(question, limit)
 | .xlsx / .xls | XSSFWorkbook → 逐行逐列 | poi-ooxml |
 | .txt / .md / .csv / .json / .xml / .yml / .properties / .html / .css | Files.readString | — |
 
-### 3.7 AgentService㉒ — ReAct㉓ 引擎
+### 3.8 AgentService㉒ — ReAct㉓ 引擎
 
 核心循环：三层路由引擎前置过滤工具，LLM 交替进行推理和工具调用㉔，直至生成最终回答或达到最大轮次。
 
@@ -358,7 +396,16 @@ agentChat(conversationId, userMessage)
 - **确认点 #2（写操作二次确认）**：非白名单 WRITE 操作逐项确认，防止误写
 - 确认点存储于 Redis㉑，TTL 5 分钟，降级时切 LocalCache
 
-### 3.7.1 SubAgent — 子 Agent 执行器
+**DeepSeek V4 适配**：
+
+| 问题 | 处理方式 |
+|------|----------|
+| `tool_calls` 位于 `message.tool_calls`（非 choice 层） | 优先读 `choice.tool_calls` 无数据时降级读 `message.tool_calls` |
+| `reasoning_content` 必须回传 | 通过 Jackson `@JsonProperty` 自动反序列化到 Message 并原样序列化回请求 |
+| `reasoning_content` 可能位于 choice 或 message 层 | 两层级都检查并合并到 Message |
+| `assistant(tool_calls)` 后必须紧跟 `tool` 响应 | `handlePlanConfirm` 在注入"已确认计划"前先移除 orphaned assistant(tool_calls) |
+
+### 3.8.1 SubAgent — 子 Agent 执行器
 
 被 `MultiAgentTools.delegateTask` 调用，在主 Agent 的 ReAct 循环内独立执行子任务：
 
@@ -373,11 +420,11 @@ agentChat(conversationId, userMessage)
 
 特点：无 Redis 持久化、无确认流程、工具域隔离——子 Agent 只管执行并返回，结果由主 Agent 汇总统筹。
 
-### 3.7.2 AgentFallback — 兜底回复
+### 3.8.2 AgentFallback — 兜底回复
 
 当 Agent 链路异常时（无匹配工具、工具调用失败、LLM 异常、满 10 轮），生成用户友好的中文兜底消息，避免将技术异常暴露给用户。
 
-### 3.8 ToolRegistry — 工具注册中心
+### 3.9 ToolRegistry — 工具注册中心
 
 ```
 启动时：
@@ -389,21 +436,21 @@ agentChat(conversationId, userMessage)
   isAutoConfirm(toolName) → 判断是否在白名单中（跳过二次确认㉕）
 ```
 
-### 3.9 ConversationStore — 会话存储
+### 3.10 ConversationStore — 会话存储
 
 - 存储位置：Redis㉑ `conversation:{conversationId}`（String 类型 + Jackson JSON）
 - 存储内容：消息历史、checkpoint 轮次、planConfirmed 标志、已批准的操作计划
 - 过期策略：Redis TTL 30 分钟，无访问自动过期
 - **降级策略**：Redis 不可用时自动切换 `LocalCache`（1000 条容量上限 / 30 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
 
-### 3.10 ConfirmationStore — 确认点存储
+### 3.11 ConfirmationStore — 确认点存储
 
 - 存储位置：Redis㉑ `confirmation:{confirmationId}`（String 类型 + Jackson JSON）
 - 两种类型：plan（操作计划确认）、exec（写操作二次确认）
 - 过期策略：Redis TTL 5 分钟
 - **降级策略**：Redis 不可用时自动切换 `LocalCache`（500 条容量上限 / 5 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
 
-### 3.11 ingest.py — 文档摄入管线
+### 3.12 ingest.py — 文档摄入管线
 
 ```
 ingest.py <directory> [options]
@@ -600,6 +647,9 @@ store:
 | **领域分类** | **LLM 轻量调用（DeepSeek + 简短系统提示）** | **比关键词匹配更准确理解用户意图，比完整 ReAct 更轻量（单次调用）** |
 | **工具召回** | **语义 Embedding（nomic-embed-text）+ 频率衰减补全** | **语义检索找到功能匹配的工具，频率补全兜底冷启动和 Embedding 失败** |
 | **能力校验** | **关键词规则引擎（CapabilityKeywords 中英文 11 组映射）** | **极低延迟（纯内存匹配），拒绝明显不匹配的调用，减少 LLM 幻觉执行** |
+| DeepSeek V4 `reasoning_content` 轮播 | 通过 `@JsonProperty` 自动反序列化到 Message 并原样序列化回请求 | V4 thinking mode 强制要求回传此字段，否则 HTTP 400 |
+| `tool_calls` 位置差异 | 同时检查 `choice.tool_calls` 和 `message.tool_calls` | V4 将 `tool_calls` 放在 message 内部，旧代码只检查 choice 层 |
+| `assistant(tool_calls)` 消息序列 | 注入新消息前先移除 orphaned assistant 消息 | OpenAI-compatible API 要求 tool_calls 后必须紧跟 tool 响应 |
 | 降级策略 | 组件异常时静默降级 | 不阻塞主流程 |
 
 ---
@@ -629,3 +679,5 @@ store:
 | **LLM API 异常** | **AgentFallback.apiUnavailable()，返回"大脑暂时离线，请稍后再试"** |
 | **Tool 调用返回异常** | **AgentFallback.toolExecutionFailed(name, detail)，异常回送 LLM 决定重试或告知用户** |
 | **CapabilityGuard 校验不通过** | **拒绝执行，错误回送 LLM，由 LLM 修正调用或改用其他方式** |
+| **DeepSeek V4 missing `reasoning_content`** | **400 "reasoning_content must be passed back" → `@JsonProperty` 自动保留并回传** |
+| **DeepSeek V4 orphaned `assistant(tool_calls)`** | **400 "must be followed by tool messages" → 注入新消息前先移除 orphaned assistant** |

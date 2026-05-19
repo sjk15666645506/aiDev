@@ -1,5 +1,6 @@
 package com.deepseek.demo.service;
 
+import com.deepseek.demo.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -14,8 +15,8 @@ public class GeneralRagService {
 
     private static final Logger log = LoggerFactory.getLogger(GeneralRagService.class);
 
-    private final VectorService vectorService;
-    private final DeepSeekService deepSeekService;
+    private final IVectorSearchService vectorService;
+    private final ILlmService deepSeekService;
 
     /**
      * 构造 GeneralRagService
@@ -23,7 +24,7 @@ public class GeneralRagService {
      * @param vectorService   向量检索服务（Qdrant + Meilisearch 混合检索）
      * @param deepSeekService DeepSeek LLM 调用服务
      */
-    public GeneralRagService(VectorService vectorService, DeepSeekService deepSeekService) {
+    public GeneralRagService(IVectorSearchService vectorService, ILlmService deepSeekService) {
         this.vectorService = vectorService;
         this.deepSeekService = deepSeekService;
     }
@@ -46,7 +47,7 @@ public class GeneralRagService {
      * @return LLM 回答文本
      */
     public String ragChat(String question, int limit) {
-        log.info("通用知识库请求: question={}, limit={}", truncate(question, 50), limit);
+        log.info("通用知识库请求: question={}, limit={}", StringUtils.truncate(question, 50), limit);
 
         List<Map<String, Object>> contexts = vectorService.searchDocsWithFullContent(question, limit);
         contexts = filterAndTruncate(contexts);
@@ -74,7 +75,7 @@ public class GeneralRagService {
      * @param onContent 逐字符回调接收 LLM 输出
      */
     public void ragChatStream(String question, int limit, Consumer<String> onContent) {
-        log.info("通用知识库流式请求: question={}, limit={}", truncate(question, 50), limit);
+        log.info("通用知识库流式请求: question={}, limit={}", StringUtils.truncate(question, 50), limit);
 
         List<Map<String, Object>> contexts = vectorService.searchDocsWithFullContent(question, limit);
         contexts = filterAndTruncate(contexts);
@@ -97,7 +98,7 @@ public class GeneralRagService {
         if (filtered.isEmpty()) {
             log.warn("所有结果均低于 score 阈值({})，降级为纯 LLM 回答", SCORE_THRESHOLD);
         }
-        return VectorService.truncateContexts(filtered, VectorService.MAX_CONTEXT_CHARS);
+        return IVectorSearchService.truncateContexts(filtered, IVectorSearchService.MAX_CONTEXT_CHARS);
     }
 
     /**
@@ -127,8 +128,4 @@ public class GeneralRagService {
                 "请用中文回答。\n\n参考内容：\n" + contextText;
     }
 
-    private String truncate(String s, int maxLen) {
-        if (s == null) return null;
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
-    }
 }

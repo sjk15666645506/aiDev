@@ -14,6 +14,11 @@ import java.util.List;
  */
 public class Message {
 
+    public static final String ROLE_SYSTEM = "system";
+    public static final String ROLE_USER = "user";
+    public static final String ROLE_ASSISTANT = "assistant";
+    public static final String ROLE_TOOL = "tool";
+
     /** 角色：system / user / assistant / tool */
     private String role;
 

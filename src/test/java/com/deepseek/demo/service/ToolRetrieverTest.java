@@ -16,11 +16,11 @@ import static org.mockito.Mockito.*;
 class ToolRetrieverTest {
 
     @Mock
-    private ToolRegistry toolRegistry;
+    private IToolRegistry toolRegistry;
     @Mock
     private ToolVectorStore vectorStore;
     @Mock
-    private VectorService vectorService;
+    private EmbeddingClient embeddingClient;
 
     private FrequencyTracker frequencyTracker;
     private ToolRetriever retriever;
@@ -29,7 +29,7 @@ class ToolRetrieverTest {
     void setUp() {
         frequencyTracker = new FrequencyTracker();
         retriever = new ToolRetriever(toolRegistry, vectorStore,
-                vectorService, frequencyTracker);
+                embeddingClient, frequencyTracker);
     }
 
     @Test

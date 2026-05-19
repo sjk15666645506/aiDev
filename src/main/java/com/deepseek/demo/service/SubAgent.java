@@ -4,6 +4,7 @@ import com.deepseek.demo.annotation.ToolDomain;
 import com.deepseek.demo.dto.DeepSeekChatResponse;
 import com.deepseek.demo.dto.Message;
 import com.deepseek.demo.dto.ToolCall;
+import com.deepseek.demo.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -33,10 +34,10 @@ public class SubAgent {
     /** 子 Agent 最大迭代轮数 */
     private static final int MAX_ITERATIONS = 3;
 
-    private final DeepSeekService deepSeekService;
-    private final ToolRegistry toolRegistry;
+    private final ILlmService deepSeekService;
+    private final IToolRegistry toolRegistry;
 
-    public SubAgent(DeepSeekService deepSeekService, ToolRegistry toolRegistry) {
+    public SubAgent(ILlmService deepSeekService, IToolRegistry toolRegistry) {
         this.deepSeekService = deepSeekService;
         this.toolRegistry = toolRegistry;
     }
@@ -50,7 +51,7 @@ public class SubAgent {
      */
     public String execute(String taskDescription, String domainName) {
         log.info("子 Agent 启动: domain={}, task={}",
-                domainName, truncate(taskDescription, 100));
+                domainName, StringUtils.truncate(taskDescription, 100));
 
         // 1. 解析领域
         ToolDomain domain;
@@ -80,8 +81,8 @@ public class SubAgent {
                 + "完成后给出最终结论，不需要询问用户确认。";
 
         List<Message> messages = new ArrayList<>();
-        messages.add(new Message("system", systemPrompt));
-        messages.add(new Message("user", taskDescription));
+        messages.add(new Message(Message.ROLE_SYSTEM, systemPrompt));
+        messages.add(new Message(Message.ROLE_USER, taskDescription));
 
         // 4. mini ReAct 循环
         for (int i = 0; i < MAX_ITERATIONS; i++) {
@@ -103,13 +104,7 @@ public class SubAgent {
 
             DeepSeekChatResponse.Choice choice = response.getChoices().get(0);
             Message responseMessage = choice.getMessage();
-            List<ToolCall> toolCalls = choice.getToolCalls();
-            if ((toolCalls == null || toolCalls.isEmpty()) && responseMessage.getToolCalls() != null) {
-                toolCalls = responseMessage.getToolCalls();
-            }
-            if (choice.getReasoningContent() != null) {
-                responseMessage.setReasoningContent(choice.getReasoningContent());
-            }
+            List<ToolCall> toolCalls = DeepSeekResponseNormalizer.normalizeToolCalls(choice);
             messages.add(responseMessage);
 
             // 无 tool_calls → 返回最终回答
@@ -123,11 +118,11 @@ public class SubAgent {
             for (ToolCall tc : toolCalls) {
                 try {
                     String result = toolRegistry.execute(tc);
-                    messages.add(new Message("tool", result, tc.getId()));
+                    messages.add(new Message(Message.ROLE_TOOL, result, tc.getId()));
                     log.debug("子 Agent 工具执行成功: tool={}", tc.getFunction().getName());
                 } catch (Exception e) {
                     log.error("子 Agent 工具执行失败: tool={}", tc.getFunction().getName(), e);
-                    messages.add(new Message("tool",
+                    messages.add(new Message(Message.ROLE_TOOL,
                             "执行异常: " + e.getMessage(), tc.getId()));
                 }
             }
@@ -141,7 +136,7 @@ public class SubAgent {
     /** 获取最后一条 assistant 消息的内容 */
     private String getLastAssistantContent(List<Message> messages) {
         for (int i = messages.size() - 1; i >= 0; i--) {
-            if ("assistant".equals(messages.get(i).getRole())) {
+            if (Message.ROLE_ASSISTANT.equals(messages.get(i).getRole())) {
                 String c = messages.get(i).getContent();
                 if (c != null && !c.isEmpty()) return c;
             }
@@ -149,8 +144,4 @@ public class SubAgent {
         return "";
     }
 
-    private String truncate(String s, int maxLen) {
-        if (s == null) return null;
-        return s.length() <= maxLen ? s : s.substring(0, maxLen) + "...";
-    }
 }

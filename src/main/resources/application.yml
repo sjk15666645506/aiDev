@@ -41,6 +41,16 @@ logging:
   pattern:
     console: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n"
 
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,metrics
+  metrics:
+    export:
+      simple:
+        enabled: true
+
 tool:
   whitelist: ${TOOL_WHITELIST:}
   execution:

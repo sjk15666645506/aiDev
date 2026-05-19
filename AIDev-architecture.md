@@ -132,8 +132,8 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   └── AgentController.java           # Agent㉒ 对话 & 确认 API
 │   ├── dto/
 │   │   ├── DeepSeekChatRequest.java       # LLM② 请求体（扩展 tools/tool_choice）
-│   │   ├── DeepSeekChatResponse.java      # LLM 响应体（扩展 tool_calls㉔）
-│   │   ├── Message.java                   # 消息体（扩展 toolCalls/toolCallId/name）
+│   │   ├── DeepSeekChatResponse.java      # LLM 响应体（扩展 tool_calls㉔ + reasoning_content）
+│   │   ├── Message.java                   # 消息体（扩展 toolCalls/toolCallId/name + reasoning_content）
 │   │   ├── ToolCall.java                  # ToolCall㉔ DTO
 │   │   ├── FunctionCall.java              # FunctionCall DTO
 │   │   ├── AgentResponse.java             # Agent 统一响应
@@ -230,8 +230,10 @@ DeepSeekService
 
 - 请求地址：`${deepseek.base-url}/v1/chat/completions`
 - 鉴权：`Authorization: Bearer ${deepseek.api-key}`
-- 模型：`deepseek-chat`
+- 模型：`deepseek-v4-flash`（2026-07-24 前也可用 `deepseek-chat` 别名）
 - 流式模式：通过 `RestTemplate.execute` 直接读取 HTTP 响应流，逐行解析 `data: ` SSE⑯ 事件
+- **V4 响应解析**：`hasToolCalls` 同时检查 `choice.tool_calls` 和 `message.tool_calls`（V4 将 tool_calls 放在 message 内部）
+- **请求/响应 DEBUG 日志**：logback 级别 `com.deepseek.demo: DEBUG` 时打印完整 JSON
 
 ### 3.3 VectorService — 向量检索与混合检索
 
@@ -357,6 +359,15 @@ agentChat(conversationId, userMessage)
 - **确认点 #1（操作计划确认）**：LLM 返回 tool_calls 且 planConfirmed=false 时触发，用户确认后开始逐项执行
 - **确认点 #2（写操作二次确认）**：非白名单 WRITE 操作逐项确认，防止误写
 - 确认点存储于 Redis㉑，TTL 5 分钟，降级时切 LocalCache
+
+**DeepSeek V4 适配**：
+
+| 问题 | 处理方式 |
+|------|----------|
+| `tool_calls` 位于 `message.tool_calls`（非 choice 层） | 优先读 `choice.tool_calls` 无数据时降级读 `message.tool_calls` |
+| `reasoning_content` 必须回传 | 通过 Jackson `@JsonProperty` 自动反序列化到 Message 并原样序列化回请求 |
+| `reasoning_content` 可能位于 choice 或 message 层 | 两层级都检查并合并到 Message |
+| `assistant(tool_calls)` 后必须紧跟 `tool` 响应 | `handlePlanConfirm` 在注入"已确认计划"前先移除 orphaned assistant(tool_calls) |
 
 ### 3.7.1 SubAgent — 子 Agent 执行器
 
@@ -600,6 +611,9 @@ store:
 | **领域分类** | **LLM 轻量调用（DeepSeek + 简短系统提示）** | **比关键词匹配更准确理解用户意图，比完整 ReAct 更轻量（单次调用）** |
 | **工具召回** | **语义 Embedding（nomic-embed-text）+ 频率衰减补全** | **语义检索找到功能匹配的工具，频率补全兜底冷启动和 Embedding 失败** |
 | **能力校验** | **关键词规则引擎（CapabilityKeywords 中英文 11 组映射）** | **极低延迟（纯内存匹配），拒绝明显不匹配的调用，减少 LLM 幻觉执行** |
+| DeepSeek V4 `reasoning_content` 轮播 | 通过 `@JsonProperty` 自动反序列化到 Message 并原样序列化回请求 | V4 thinking mode 强制要求回传此字段，否则 HTTP 400 |
+| `tool_calls` 位置差异 | 同时检查 `choice.tool_calls` 和 `message.tool_calls` | V4 将 `tool_calls` 放在 message 内部，旧代码只检查 choice 层 |
+| `assistant(tool_calls)` 消息序列 | 注入新消息前先移除 orphaned assistant 消息 | OpenAI-compatible API 要求 tool_calls 后必须紧跟 tool 响应 |
 | 降级策略 | 组件异常时静默降级 | 不阻塞主流程 |
 
 ---
@@ -629,3 +643,5 @@ store:
 | **LLM API 异常** | **AgentFallback.apiUnavailable()，返回"大脑暂时离线，请稍后再试"** |
 | **Tool 调用返回异常** | **AgentFallback.toolExecutionFailed(name, detail)，异常回送 LLM 决定重试或告知用户** |
 | **CapabilityGuard 校验不通过** | **拒绝执行，错误回送 LLM，由 LLM 修正调用或改用其他方式** |
+| **DeepSeek V4 missing `reasoning_content`** | **400 "reasoning_content must be passed back" → `@JsonProperty` 自动保留并回传** |
+| **DeepSeek V4 orphaned `assistant(tool_calls)`** | **400 "must be followed by tool messages" → 注入新消息前先移除 orphaned assistant** |

@@ -111,7 +111,10 @@ public final class ChatMessageJsonUtil {
                             .arguments(func != null ? (String) func.get("arguments") : "{}")
                             .build());
                 }
-                return new AiMessage(content != null ? content : "", requests);
+                if (content != null && !content.isBlank()) {
+                    return new AiMessage(content, requests);
+                }
+                return new AiMessage(requests);
             }
             return AiMessage.from(content != null ? content : "");
         } else if ("tool".equals(role)) {

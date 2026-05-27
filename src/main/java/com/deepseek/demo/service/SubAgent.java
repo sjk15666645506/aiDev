@@ -16,6 +16,7 @@ import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.stream.Collectors;
 
 @Component
@@ -65,43 +66,49 @@ public class SubAgent {
         messages.add(SystemMessage.from(systemPrompt));
         messages.add(UserMessage.from(taskDescription));
 
-        for (int i = 0; i < MAX_ITERATIONS; i++) {
-            log.debug("子 Agent 第 {} 轮调用 LLM", i + 1);
+        String subConversationId = UUID.randomUUID().toString();
+        LlmContext.setConversationId(subConversationId);
+        try {
+            for (int i = 0; i < MAX_ITERATIONS; i++) {
+                log.debug("子 Agent 第 {} 轮调用 LLM", i + 1);
 
-            Response<AiMessage> response;
-            try {
-                response = deepSeekService.chatWithTools(messages, toolSchemas);
-            } catch (Exception e) {
-                log.error("子 Agent LLM 调用失败", e);
-                return "子任务执行失败: " + e.getMessage();
-            }
-
-            if (response == null || response.content() == null) {
-                log.warn("子 Agent LLM 返回空响应");
-                break;
-            }
-
-            AiMessage aiMessage = response.content();
-            List<ToolExecutionRequest> toolCalls = aiMessage.toolExecutionRequests();
-            messages.add(aiMessage);
-
-            if (toolCalls == null || toolCalls.isEmpty()) {
-                String content = aiMessage.text();
-                log.info("子 Agent 完成: domain={}", domain);
-                return content != null ? content : "";
-            }
-
-            for (ToolExecutionRequest tc : toolCalls) {
+                Response<AiMessage> response;
                 try {
-                    String result = toolRegistry.execute(tc);
-                    messages.add(ToolExecutionResultMessage.from(tc, result));
-                    log.debug("子 Agent 工具执行成功: tool={}", tc.name());
+                    response = deepSeekService.chatWithTools(messages, toolSchemas);
                 } catch (Exception e) {
-                    log.error("子 Agent 工具执行失败: tool={}", tc.name(), e);
-                    messages.add(new ToolExecutionResultMessage(tc.id(), tc.name(),
-                            "执行异常: " + e.getMessage()));
+                    log.error("子 Agent LLM 调用失败", e);
+                    return "子任务执行失败: " + e.getMessage();
+                }
+
+                if (response == null || response.content() == null) {
+                    log.warn("子 Agent LLM 返回空响应");
+                    break;
+                }
+
+                AiMessage aiMessage = response.content();
+                List<ToolExecutionRequest> toolCalls = aiMessage.toolExecutionRequests();
+                messages.add(aiMessage);
+
+                if (toolCalls == null || toolCalls.isEmpty()) {
+                    String content = aiMessage.text();
+                    log.info("子 Agent 完成: domain={}", domain);
+                    return content != null ? content : "";
+                }
+
+                for (ToolExecutionRequest tc : toolCalls) {
+                    try {
+                        String result = toolRegistry.execute(tc);
+                        messages.add(ToolExecutionResultMessage.from(tc, result));
+                        log.debug("子 Agent 工具执行成功: tool={}", tc.name());
+                    } catch (Exception e) {
+                        log.error("子 Agent 工具执行失败: tool={}", tc.name(), e);
+                        messages.add(new ToolExecutionResultMessage(tc.id(), tc.name(),
+                                "执行异常: " + e.getMessage()));
+                    }
                 }
             }
+        } finally {
+            LlmContext.clear();
         }
 
         log.warn("子 Agent 达到最大迭代次数: domain={}", domain);

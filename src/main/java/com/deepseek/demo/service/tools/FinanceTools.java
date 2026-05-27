@@ -49,14 +49,14 @@ public class FinanceTools {
           parameters = {
               @ToolParam(name = "stock_name", type = "string",
                          description = "股票名称，如 贵州茅台、中国平安"),
-              @ToolParam(name = "shares", type = "number",
+              @ToolParam(name = "shares", type = "integer",
                          description = "买入股数")
           },
           action = ActionType.WRITE)
-    public String buyStock(String stockName, String shares) {
+    public String buyStock(String stockName, Integer shares) {
         String name = (stockName != null && !stockName.isBlank()) ? stockName
                 : STOCK_NAMES[RANDOM.nextInt(STOCK_NAMES.length)];
-        int shareCount = (shares != null && !shares.isBlank()) ? Integer.parseInt(shares)
+        int shareCount = (shares != null) ? shares
                 : (RANDOM.nextInt(10) + 1) * 100;
         double price = 10 + RANDOM.nextDouble() * 200;
         double total = shareCount * price;
@@ -80,14 +80,14 @@ public class FinanceTools {
           parameters = {
               @ToolParam(name = "stock_name", type = "string",
                          description = "股票名称，如 贵州茅台、中国平安"),
-              @ToolParam(name = "shares", type = "number",
+              @ToolParam(name = "shares", type = "integer",
                          description = "卖出股数")
           },
           action = ActionType.WRITE)
-    public String sellStock(String stockName, String shares) {
+    public String sellStock(String stockName, Integer shares) {
         String name = (stockName != null && !stockName.isBlank()) ? stockName
                 : STOCK_NAMES[RANDOM.nextInt(STOCK_NAMES.length)];
-        int shareCount = (shares != null && !shares.isBlank()) ? Integer.parseInt(shares)
+        int shareCount = (shares != null) ? shares
                 : (RANDOM.nextInt(5) + 1) * 100;
         double price = 10 + RANDOM.nextDouble() * 200;
 

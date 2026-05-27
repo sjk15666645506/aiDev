@@ -1,10 +1,12 @@
 deepseek:
   api-key: ${DEEPSEEK_API_KEY}
   base-url: https://api.deepseek.com
+  model: deepseek-v4-flash
 
 qdrant:
   host: localhost
   port: 16333
+  grpc-port: 16334
   doc-collection: aiknowledge-doc
 
 ollama:

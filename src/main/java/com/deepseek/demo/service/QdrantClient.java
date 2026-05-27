@@ -27,6 +27,7 @@ public class QdrantClient {
     private final QdrantEmbeddingStore embeddingStore;
     private final String qdrantHost;
     private final int qdrantPort;
+    private final int qdrantGrpcPort;
     private final String docCollection;
 
     private String docVectorName;
@@ -34,18 +35,20 @@ public class QdrantClient {
     public QdrantClient(RestTemplate restTemplate,
                         @Value("${qdrant.host}") String qdrantHost,
                         @Value("${qdrant.port}") int qdrantPort,
+                        @Value("${qdrant.grpc-port}") int qdrantGrpcPort,
                         @Value("${qdrant.doc-collection}") String docCollection) {
         this.restTemplate = restTemplate;
         this.qdrantHost = qdrantHost;
         this.qdrantPort = qdrantPort;
+        this.qdrantGrpcPort = qdrantGrpcPort;
         this.docCollection = docCollection;
         this.embeddingStore = QdrantEmbeddingStore.builder()
                 .host(qdrantHost)
-                .port(qdrantPort)
+                .port(qdrantGrpcPort)
                 .collectionName(docCollection)
                 .build();
-        log.info("QdrantEmbeddingStore 已创建: host={}, port={}, collection={}",
-                qdrantHost, qdrantPort, docCollection);
+        log.info("QdrantEmbeddingStore 已创建: host={}, grpcPort={}, collection={}",
+                qdrantHost, qdrantGrpcPort, docCollection);
     }
 
     @PostConstruct

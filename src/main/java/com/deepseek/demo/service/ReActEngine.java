@@ -99,11 +99,14 @@ public class ReActEngine {
             conversationStore.saveCheckpoint(conversationId, messages, i);
 
             Response<AiMessage> response;
+            LlmContext.setConversationId(conversationId);
             try {
                 response = deepSeekService.chatWithTools(messages, toolSchemas);
             } catch (Exception e) {
                 log.error("LLM API 调用失败(第{}轮)", i, e);
                 return AgentResponse.error(AgentFallback.apiUnavailable());
+            } finally {
+                LlmContext.clear();
             }
 
             if (response == null || response.content() == null) {
@@ -119,6 +122,17 @@ public class ReActEngine {
                 if (i == 0 && toolSchemas != null && !toolSchemas.isEmpty()) {
                     ToolExecutionRequest matched = autoMatchTool(messages, toolSchemas);
                     if (matched != null) {
+                        // 如果该工具刚执行过（结果已在消息中），跳过自动匹配
+                        boolean alreadyExecuted = messages.stream()
+                                .anyMatch(m -> m instanceof ToolExecutionResultMessage
+                                        && ((ToolExecutionResultMessage) m).toolName().equals(matched.name()));
+                        if (alreadyExecuted) {
+                            log.info("工具 {} 已执行过，跳过自动匹配", matched.name());
+                            conversationStore.clearCheckpoint(conversationId);
+                            String content = aiMessage.text();
+                            return AgentResponse.done(content != null ? content : "");
+                        }
+
                         log.info("LLM 未调用工具，自动匹配执行: {}", matched.name());
                         messages.remove(messages.size() - 1);
                         if (!planConfirmed) {
@@ -226,7 +240,8 @@ public class ReActEngine {
 
     private ToolExecutionRequest autoMatchTool(List<ChatMessage> messages, List<ToolSpecification> toolSchemas) {
         String userMsg = null;
-        for (ChatMessage msg : messages) {
+        for (int i = messages.size() - 1; i >= 0; i--) {
+            ChatMessage msg = messages.get(i);
             if (msg instanceof UserMessage) {
                 userMsg = ((UserMessage) msg).singleText();
                 if (userMsg != null && !userMsg.isBlank()) break;

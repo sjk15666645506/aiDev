@@ -74,8 +74,13 @@ public class AgentService {
                     selectedTools.stream().map(ToolMeta::getName).collect(Collectors.toList()));
 
             List<ChatMessage> messages = conversationStore.getMessages(conversationId);
-            if (messages.isEmpty()) {
+            boolean isFirstMessage = messages.isEmpty();
+            if (isFirstMessage) {
                 messages.add(SystemMessage.from(buildSystemPrompt(knowledgeContext)));
+            } else {
+                // 后续消息：清除旧批准计划，但保留 planConfirmed=true
+                // 这样 READ 工具不再需要 plan 确认；WRITE 工具仍会走 exec 确认
+                conversationStore.setApprovedPlan(conversationId, null);
             }
 
             messages.add(UserMessage.from(userMessage));

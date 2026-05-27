@@ -4,18 +4,20 @@ import com.deepseek.demo.util.ChatMessageJsonUtil;
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolParameters;
 import dev.langchain4j.agent.tool.ToolSpecification;
 import dev.langchain4j.data.message.ChatMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -80,8 +82,13 @@ public class ConversationStore implements IConversationStore {
         @SuppressWarnings("unchecked")
         List<ToolSpecification> getSelectedToolSpecs(ObjectMapper om) {
             try {
-                return om.readValue(selectedToolSchemasJson,
-                        om.getTypeFactory().constructCollectionType(List.class, ToolSpecification.class));
+                List<Map<String, Object>> list = om.readValue(selectedToolSchemasJson,
+                        new TypeReference<List<Map<String, Object>>>() {});
+                List<ToolSpecification> result = new ArrayList<>(list.size());
+                for (Map<String, Object> map : list) {
+                    result.add(mapToToolSpec(map));
+                }
+                return result;
             } catch (Exception e) {
                 log.warn("工具 schemas 反序列化失败，返回空列表", e);
                 return new ArrayList<>();
@@ -91,11 +98,52 @@ public class ConversationStore implements IConversationStore {
         @JsonIgnore
         void setSelectedToolSpecs(List<ToolSpecification> specs, ObjectMapper om) {
             try {
-                this.selectedToolSchemasJson = om.writeValueAsString(specs);
+                List<Map<String, Object>> list = new ArrayList<>(specs.size());
+                for (ToolSpecification spec : specs) {
+                    list.add(toolSpecToMap(spec));
+                }
+                this.selectedToolSchemasJson = om.writeValueAsString(list);
             } catch (JsonProcessingException e) {
                 log.error("工具 schemas 序列化失败", e);
                 this.selectedToolSchemasJson = "[]";
             }
+        }
+
+        private Map<String, Object> toolSpecToMap(ToolSpecification spec) {
+            Map<String, Object> map = new LinkedHashMap<>();
+            map.put("name", spec.name());
+            map.put("description", spec.description());
+            ToolParameters params = spec.parameters();
+            if (params != null) {
+                Map<String, Object> paramsMap = new LinkedHashMap<>();
+                paramsMap.put("type", params.type());
+                paramsMap.put("properties", params.properties());
+                paramsMap.put("required", params.required());
+                map.put("parameters", paramsMap);
+            }
+            return map;
+        }
+
+        @SuppressWarnings("unchecked")
+        private ToolSpecification mapToToolSpec(Map<String, Object> map) {
+            ToolSpecification.Builder builder = ToolSpecification.builder()
+                    .name((String) map.get("name"))
+                    .description((String) map.get("description"));
+            Map<String, Object> paramsMap = (Map<String, Object>) map.get("parameters");
+            if (paramsMap != null) {
+                ToolParameters.Builder tpBuilder = ToolParameters.builder()
+                        .type((String) paramsMap.getOrDefault("type", "object"));
+                Map<String, Map<String, Object>> props = (Map<String, Map<String, Object>>) paramsMap.get("properties");
+                if (props != null && !props.isEmpty()) {
+                    tpBuilder.properties(props);
+                }
+                List<String> required = (List<String>) paramsMap.get("required");
+                if (required != null && !required.isEmpty()) {
+                    tpBuilder.required(new ArrayList<>(required));
+                }
+                builder.parameters(tpBuilder.build());
+            }
+            return builder.build();
         }
     }
 

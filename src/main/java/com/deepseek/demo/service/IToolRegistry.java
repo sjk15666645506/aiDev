@@ -1,17 +1,18 @@
 package com.deepseek.demo.service;
 
 import com.deepseek.demo.annotation.ToolDomain;
-import com.deepseek.demo.dto.ToolCall;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.agent.tool.ToolSpecification;
 
 import java.util.List;
 import java.util.Map;
 
 public interface IToolRegistry {
-    List<Map<String, Object>> toJsonSchema();
-    List<Map<String, Object>> toJsonSchema(List<ToolMeta> toolMetas);
+    List<ToolSpecification> toToolSpecifications();
+    List<ToolSpecification> toToolSpecifications(List<ToolMeta> toolMetas);
     ToolMeta getTool(String name);
     Map<String, ToolMeta> getAllTools();
     List<ToolMeta> getByDomain(ToolDomain domain);
     boolean isAutoConfirm(String toolName);
-    String execute(ToolCall toolCall);
+    String execute(ToolExecutionRequest request);
 }

@@ -1,6 +1,9 @@
 package com.deepseek.demo.store;
 
-import com.deepseek.demo.dto.Message;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.UserMessage;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -11,11 +14,6 @@ import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * ConversationStore 的集成测试（Redis 后端）。
- * 覆盖消息存取、检查点、计划确认和审批计划功能。
- * 过期清理由 Redis TTL 自动完成，不在此处测试。
- */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class ConversationStoreTest {
 
@@ -25,7 +23,6 @@ class ConversationStoreTest {
     @Autowired
     private StringRedisTemplate redisTemplate;
 
-    /** 清理测试数据 */
     @AfterEach
     void tearDown() {
         Set<String> keys = redisTemplate.keys("conversation:*");
@@ -36,54 +33,54 @@ class ConversationStoreTest {
 
     @Test
     void shouldReturnEmptyListWhenConversationNotFound() {
-        List<Message> messages = store.getMessages("non-existent");
+        List<ChatMessage> messages = store.getMessages("non-existent");
         assertNotNull(messages);
         assertTrue(messages.isEmpty());
     }
 
     @Test
     void shouldSaveAndRetrieveMessages() {
-        List<Message> messages = Arrays.asList(
-                new Message("user", "你好"),
-                new Message("assistant", "你好！有什么可以帮助你的吗？")
+        List<ChatMessage> messages = Arrays.asList(
+                UserMessage.from("你好"),
+                AiMessage.from("你好！有什么可以帮助你的吗？")
         );
 
         store.saveMessages("conv-1", messages);
-        List<Message> retrieved = store.getMessages("conv-1");
+        List<ChatMessage> retrieved = store.getMessages("conv-1");
 
         assertEquals(2, retrieved.size());
-        assertEquals("user", retrieved.get(0).getRole());
-        assertEquals("你好", retrieved.get(0).getContent());
-        assertEquals("assistant", retrieved.get(1).getRole());
+        assertTrue(retrieved.get(0) instanceof UserMessage);
+        assertEquals("你好", ((UserMessage) retrieved.get(0)).singleText());
+        assertTrue(retrieved.get(1) instanceof AiMessage);
     }
 
     @Test
     void shouldOverwriteExistingMessages() {
-        List<Message> initial = Arrays.asList(new Message("user", "Hello"));
+        List<ChatMessage> initial = Arrays.asList(UserMessage.from("Hello"));
         store.saveMessages("conv-1", initial);
 
-        List<Message> updated = Arrays.asList(
-                new Message("user", "Hi"),
-                new Message("assistant", "How can I help?")
+        List<ChatMessage> updated = Arrays.asList(
+                UserMessage.from("Hi"),
+                AiMessage.from("How can I help?")
         );
         store.saveMessages("conv-1", updated);
 
-        List<Message> retrieved = store.getMessages("conv-1");
+        List<ChatMessage> retrieved = store.getMessages("conv-1");
         assertEquals(2, retrieved.size());
-        assertEquals("Hi", retrieved.get(0).getContent());
+        assertEquals("Hi", ((UserMessage) retrieved.get(0)).singleText());
     }
 
     @Test
     void shouldSaveAndClearCheckpoint() {
-        List<Message> messages = Arrays.asList(new Message("user", "创建任务"));
+        List<ChatMessage> messages = Arrays.asList(UserMessage.from("创建任务"));
 
         store.saveCheckpoint("conv-1", messages, 5);
-        List<Message> retrieved = store.getMessages("conv-1");
+        List<ChatMessage> retrieved = store.getMessages("conv-1");
         assertEquals(1, retrieved.size());
 
         store.clearCheckpoint("conv-1");
         store.saveCheckpoint("conv-1", messages, 0);
-        List<Message> afterClear = store.getMessages("conv-1");
+        List<ChatMessage> afterClear = store.getMessages("conv-1");
         assertEquals(1, afterClear.size());
     }
 
@@ -101,7 +98,6 @@ class ConversationStoreTest {
     void shouldSetAndReturnPlanConfirmed() {
         boolean previous = store.setPlanConfirmed("conv-1", true);
         assertFalse(previous);
-
         assertTrue(store.getPlanConfirmed("conv-1"));
     }
 
@@ -109,7 +105,6 @@ class ConversationStoreTest {
     void shouldReturnPreviousPlanConfirmedState() {
         store.setPlanConfirmed("conv-1", true);
         boolean previous = store.setPlanConfirmed("conv-1", false);
-
         assertTrue(previous);
         assertFalse(store.getPlanConfirmed("conv-1"));
     }
@@ -138,9 +133,9 @@ class ConversationStoreTest {
 
     @Test
     void shouldHandleMultipleConversations() {
-        store.saveMessages("conv-A", Arrays.asList(new Message("user", "A")));
-        store.saveMessages("conv-B", Arrays.asList(new Message("user", "B")));
-        store.saveMessages("conv-C", Arrays.asList(new Message("user", "C")));
+        store.saveMessages("conv-A", Arrays.asList(UserMessage.from("A")));
+        store.saveMessages("conv-B", Arrays.asList(UserMessage.from("B")));
+        store.saveMessages("conv-C", Arrays.asList(UserMessage.from("C")));
 
         assertEquals(1, store.getMessages("conv-A").size());
         assertEquals(1, store.getMessages("conv-B").size());
@@ -154,7 +149,7 @@ class ConversationStoreTest {
 
     @Test
     void shouldHandleMixedOperationsOnSameConversation() {
-        List<Message> messages = Arrays.asList(new Message("user", "请创建一个任务"));
+        List<ChatMessage> messages = Arrays.asList(UserMessage.from("请创建一个任务"));
         store.saveMessages("conv-1", messages);
 
         store.setPlanConfirmed("conv-1", true);

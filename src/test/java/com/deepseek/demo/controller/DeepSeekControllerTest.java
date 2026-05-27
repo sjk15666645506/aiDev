@@ -1,6 +1,6 @@
 package com.deepseek.demo.controller;
 
-import com.deepseek.demo.service.DeepSeekService;
+import com.deepseek.demo.service.ILlmService;
 import com.deepseek.demo.service.GeneralRagService;
 import com.deepseek.demo.service.VectorService;
 import org.junit.jupiter.api.Test;
@@ -22,7 +22,7 @@ class DeepSeekControllerTest {
     private MockMvc mockMvc;
 
     @MockBean
-    private DeepSeekService deepSeekService;
+    private ILlmService deepSeekService;
 
     @MockBean
     private GeneralRagService generalRagService;

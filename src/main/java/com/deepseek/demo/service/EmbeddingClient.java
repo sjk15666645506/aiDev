@@ -1,16 +1,17 @@
 package com.deepseek.demo.service;
 
 import com.deepseek.demo.util.StringUtils;
-import com.fasterxml.jackson.databind.JsonNode;
+import dev.langchain4j.data.embedding.Embedding;
+import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.model.ollama.OllamaEmbeddingModel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.*;
 import org.springframework.stereotype.Component;
-import org.springframework.web.client.RestTemplate;
 
+import java.time.Duration;
 import java.time.Instant;
-import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -19,10 +20,7 @@ public class EmbeddingClient {
 
     private static final Logger log = LoggerFactory.getLogger(EmbeddingClient.class);
 
-    private final RestTemplate restTemplate;
-    private final String ollamaHost;
-    private final int ollamaPort;
-    private final String ollamaModel;
+    private final OllamaEmbeddingModel embeddingModel;
 
     private final Map<String, EmbeddingCacheEntry> cache = new ConcurrentHashMap<>();
     private static final long CACHE_TTL_SEC = 300;
@@ -37,14 +35,17 @@ public class EmbeddingClient {
         }
     }
 
-    public EmbeddingClient(RestTemplate restTemplate,
-                           @Value("${ollama.host}") String ollamaHost,
+    public EmbeddingClient(@Value("${ollama.host}") String ollamaHost,
                            @Value("${ollama.port}") int ollamaPort,
                            @Value("${ollama.model}") String ollamaModel) {
-        this.restTemplate = restTemplate;
-        this.ollamaHost = ollamaHost;
-        this.ollamaPort = ollamaPort;
-        this.ollamaModel = ollamaModel;
+        this.embeddingModel = OllamaEmbeddingModel.builder()
+                .baseUrl("http://" + ollamaHost + ":" + ollamaPort)
+                .modelName(ollamaModel)
+                .timeout(Duration.ofSeconds(30))
+                .maxRetries(2)
+                .build();
+        log.info("EmbeddingClient initialized: baseUrl=http://{}:{}, model={}",
+                ollamaHost, ollamaPort, ollamaModel);
     }
 
     public float[] embed(String text) {
@@ -54,28 +55,16 @@ public class EmbeddingClient {
             return cached.vector;
         }
 
-        String url = "http://" + ollamaHost + ":" + ollamaPort + "/api/embed";
         log.info("生成embedding: text={}", StringUtils.truncate(text, 50));
-
-        Map<String, Object> body = new HashMap<>();
-        body.put("model", ollamaModel);
-        body.put("input", text);
-
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        HttpEntity<Map<String, Object>> entity = new HttpEntity<>(body, headers);
-
         long start = System.currentTimeMillis();
-        ResponseEntity<JsonNode> response = restTemplate.postForEntity(url, entity, JsonNode.class);
-        long elapsed = System.currentTimeMillis() - start;
 
-        JsonNode embeddings = response.getBody().path("embeddings");
-        if (embeddings.isArray() && !embeddings.isEmpty()) {
-            JsonNode vector = embeddings.get(0);
-            float[] result = new float[vector.size()];
-            for (int i = 0; i < vector.size(); i++) {
-                result[i] = (float) vector.get(i).asDouble();
-            }
+        dev.langchain4j.model.output.Response<List<Embedding>> response =
+                embeddingModel.embedAll(List.of(TextSegment.from(text)));
+
+        long elapsed = System.currentTimeMillis() - start;
+        List<Embedding> embeddings = response.content();
+        if (embeddings != null && !embeddings.isEmpty()) {
+            float[] result = embeddings.get(0).vector();
             log.debug("Embedding完成: 维度={}, 耗时={}ms", result.length, elapsed);
             cache.put(text, new EmbeddingCacheEntry(result,
                     Instant.now().getEpochSecond() + CACHE_TTL_SEC));
@@ -84,6 +73,6 @@ public class EmbeddingClient {
             }
             return result;
         }
-        throw new RuntimeException("Embedding失败: " + response.getBody());
+        throw new RuntimeException("Embedding失败: 返回空结果");
     }
 }

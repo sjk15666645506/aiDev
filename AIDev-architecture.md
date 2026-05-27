@@ -57,8 +57,9 @@
 │      │   │                 │                                    │
 │      ▼   ▼                 ▼                                    │
 │  ┌─────────────┐  ┌──────────────────┐                         │
-│  │ DeepSeekSvc │  │  AgentSvc ㉒      │                         │
-│  │ (LLM②调用)   │  │  (ReAct 循环㉓)   │                         │
+│  │ LangChain4j │  │  AgentSvc ㉒      │                         │
+│  │ LlmSvc       │  │  (ReAct 循环㉓)   │                         │
+│  │ (LLM②调用)   │  │                   │                         │
 │  └─────────────┘  └────────┬─────────┘                         │
 │                            │                                    │
 │  ┌──────────────────────────────────────────────────────┐       │
@@ -133,21 +134,15 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   ├── AgentController.java           # Agent㉒ 对话 & 确认 API
 │   │   └── GlobalExceptionHandler.java    # 全局异常处理（@RestControllerAdvice）
 │   ├── dto/
-│   │   ├── DeepSeekChatRequest.java       # LLM② 请求体（扩展 tools/tool_choice）
-│   │   ├── DeepSeekChatResponse.java      # LLM 响应体（扩展 tool_calls㉔ + reasoning_content）
-│   │   ├── Message.java                   # 消息体（扩展 toolCalls/toolCallId/name + reasoning_content）
-│   │   ├── ToolCall.java                  # ToolCall㉔ DTO
-│   │   ├── FunctionCall.java              # FunctionCall DTO
 │   │   ├── AgentResponse.java             # Agent 统一响应
 │   │   └── ConfirmationPoint.java         # 确认点㉕ DTO
 │   ├── filter/
 │   │   └── TraceFilter.java               # 全链路 traceId 注入（MDC + X-Trace-Id 响应头）
 │   ├── service/
-│   │   ├── ILlmService.java               # LLM 调用接口（DeepSeekService 实现）
-│   │   ├── IVectorSearchService.java      # 向量检索接口（VectorService 实现）
-│   │   ├── IToolRegistry.java             # 工具注册接口（ToolRegistry 实现）
-│   │   ├── DeepSeekService.java           # DeepSeek LLM 调用（含 chatWithTools）
-│   │   ├── DeepSeekResponseNormalizer.java # V4 响应 tool_calls 位置兼容处理
+│   │   ├── ILlmService.java               # LLM 调用接口（LangChain4j 原生类型）
+│   │   ├── LangChain4jLlmService.java      # LLM 调用实现（OpenAiChatModel 适配 DeepSeek API）
+│   │   ├── IVectorSearchService.java       # 向量检索接口（VectorService 实现）
+│   │   ├── IToolRegistry.java              # 工具注册接口（ToolRegistry 实现）
 │   │   ├── GeneralRagService.java         # 文档 RAG① 编排
 │   │   ├── VectorService.java             # 混合检索(RRF⑩) + 上下文扩展（844→260行）
 │   │   ├── QdrantClient.java              # Qdrant⑤ HTTP 通信（从 VectorService 提取）
@@ -177,6 +172,7 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   ├── ConfirmationStore.java         # 确认点存储（Redis, TTL 5min）
 │   │   └── LocalCache.java                # 本地缓存（TTL + 容量上限逐出）
 │   └── util/
+│       └── ChatMessageJsonUtil.java        # ChatMessage ↔ JSON 序列化（标准 OpenAI 消息格式）
 │       └── StringUtils.java               # 公共字符串工具（truncate 等）
 ├── src/main/resources/
 │   ├── application.yml                    # 本地配置（${DEEPSEEK_API_KEY}，不写真实 key）
@@ -185,17 +181,14 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   ├── controller/
 │   │   ├── DeepSeekControllerTest.java
 │   │   └── AgentControllerTest.java
+│   ├── dto/
+│   │   └── AgentResponseTest.java
 │   ├── service/
-│   │   ├── DeepSeekServiceTest.java
 │   │   ├── AgentServiceTest.java
 │   │   └── ToolRegistryTest.java
-│   ├── store/
-│   │   ├── ConversationStoreTest.java
-│   │   └── ConfirmationStoreTest.java
-│   └── dto/
-│       ├── AgentResponseTest.java
-│       ├── DeepSeekApiDtoTest.java
-│       └── MessageDtoTest.java
+│   └── store/
+│       ├── ConversationStoreTest.java
+│       └── ConfirmationStoreTest.java
 ├── ingestion-pipeline/                    # Python 摄入管线
 │   ├── ingest.py                          # 文档分块⑪ + embedding③ + 写入
 │   └── requirements.txt                   # Python 依赖
@@ -217,8 +210,7 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 | AgentController | Agent㉒ 对话 & 确认回调 HTTP 入口 | 8081 | Spring Boot |
 | GlobalExceptionHandler | 全局异常 → JSON（@RestControllerAdvice） | — | Spring Boot |
 | TraceFilter | 全链路 traceId 注入（MDC + X-Trace-Id 响应头） | — | OncePerRequestFilter |
-| DeepSeekService | 调用 DeepSeek LLM② API（非流式 + 流式），实现 ILlmService | — | RestTemplate⑰ |
-| DeepSeekResponseNormalizer | V4 响应 tool_calls 位置兼容（choice + message 双层检查） | — | — |
+| LangChain4jLlmService | 调用 DeepSeek LLM② API（非流式 + 流式），基于 OpenAiChatModel 适配，实现 ILlmService | — | LangChain4j 0.33.x |
 | GeneralRagService | RAG① 流程编排：检索 → 过滤 → 组装提示 → LLM② | — | — |
 | VectorService | 混合检索（RRF⑩ 合并）+ 上下文扩展，实现 IVectorSearchService | 16333 | Qdrant + Meilisearch |
 | QdrantClient | Qdrant⑤ HTTP 通信（collection/search/scroll/upsert） | 16333 | Qdrant REST API |
@@ -244,29 +236,32 @@ Batch 3 引入 4 个核心接口，所有消费者面向接口编程：
 
 | 接口 | 实现类 | 包 | 核心方法数 |
 |------|--------|-----|------------|
-| `ILlmService` | `DeepSeekService` | service | 6 |
+| `ILlmService` | `LangChain4jLlmService` | service | 5 |
 | `IVectorSearchService` | `VectorService` | service | 6 + 1 静态方法 |
 | `IToolRegistry` | `ToolRegistry` | service | 7 |
 | `IConversationStore` | `ConversationStore` | store | 12 |
 
 `IVectorSearchService` 还承载静态工具方法 `truncateContexts(List, int)` 和常量 `MAX_CONTEXT_CHARS`。
 
-### 3.3 DeepSeekService — LLM 调用
+### 3.3 LangChain4jLlmService — LLM 调用
+
+基于 LangChain4j 0.33.x `OpenAiChatModel` 适配 DeepSeek API（OpenAI 兼容），实现 `ILlmService` 接口。替代旧版 `DeepSeekService`（基于 RestTemplate + 自定义 DTO）。
 
 ```
-DeepSeekService
-├── chat(message)            → POST /v1/chat/completions  (非流式)
-├── chatWithSystem(prompt, msg)  → 带系统提示词的对话
-├── chat(request)            → 底层 HTTP 调用
-└── chatStream(msg, callback) → SSE⑯ 流式响应 (RestTemplate.execute⑰)
+LangChain4jLlmService
+├── chat(message)            → chatModel.generate(userMessage)
+├── chatWithSystem(prompt, msg)  → chatModel.generate(system + user)
+├── chat(messages)           → chatModel.generate(List<ChatMessage>)
+├── chatWithTools(messages, tools) → chatModel.generate(messages, tools)
+└── chatStream(msg, callback) → StreamingChatLanguageModel.generate()
 ```
 
-- 请求地址：`${deepseek.base-url}/v1/chat/completions`
+- 请求地址：`${deepseek.base-url}/v1`（OpenAiChatModel 自动拼接 `/chat/completions`）
 - 鉴权：`Authorization: Bearer ${deepseek.api-key}`
-- 模型：`deepseek-v4-flash`（2026-07-24 前也可用 `deepseek-chat` 别名）
-- 流式模式：通过 `RestTemplate.execute` 直接读取 HTTP 响应流，逐行解析 `data: ` SSE⑯ 事件
-- **V4 响应解析**：`hasToolCalls` 同时检查 `choice.tool_calls` 和 `message.tool_calls`（V4 将 tool_calls 放在 message 内部）
-- **请求/响应 DEBUG 日志**：logback 级别 `com.deepseek.demo: DEBUG` 时打印完整 JSON
+- 模型：`deepseek-v4-flash`（通过 `openai.chat.model` 配置）
+- 接口全部使用 **LangChain4j 原生类型**：`ChatMessage`（`SystemMessage` / `UserMessage` / `AiMessage` / `ToolExecutionResultMessage`）、`Response<AiMessage>`、`ToolSpecification`
+- 已删除旧版自建 DTO：`DeepSeekChatRequest`、`DeepSeekChatResponse`、`Message`、`ToolCall`、`FunctionCall`
+- 流式模式：通过 `StreamingChatLanguageModel.generate()` + `StreamingResponseHandler` 回调
 
 ### 3.4 VectorService — 向量检索与混合检索
 
@@ -367,11 +362,11 @@ agentChat(conversationId, userMessage)
    ▼
 ③ ReAct㉓ 循环 (max 10 轮)
    │
-   ├─ 调用 DeepSeek API（带 tools㉔）
+   ├─ 调用 LLM（带 ToolSpecification 列表）
    │
-   ├─ 无 tool_calls → 返回最终回答 ✅
+   ├─ 无 toolExecutionRequests → 返回最终回答 ✅
    │
-   └─ 有 tool_calls
+   └─ 有 toolExecutionRequests
          │
          ├─ planConfirmed = false → 生成操作计划确认点㉕
          │    存 checkpoint 后 return，等用户确认
@@ -387,23 +382,21 @@ agentChat(conversationId, userMessage)
               │   └─ WRITE + 非白名单 → 生成二次确认点㉕
               │
               ▼
-           执行结果追加 messages[role=tool]
+           执行结果追加 ToolExecutionResultMessage
            → 继续循环（③）
 ```
 
 **双重确认机制㉕**：
-- **确认点 #1（操作计划确认）**：LLM 返回 tool_calls 且 planConfirmed=false 时触发，用户确认后开始逐项执行
+- **确认点 #1（操作计划确认）**：LLM 返回 ToolExecutionRequest 且 planConfirmed=false 时触发，用户确认后开始逐项执行
 - **确认点 #2（写操作二次确认）**：非白名单 WRITE 操作逐项确认，防止误写
 - 确认点存储于 Redis㉑，TTL 5 分钟，降级时切 LocalCache
 
-**DeepSeek V4 适配**：
+**类型现代化（Phase 3）**：
 
-| 问题 | 处理方式 |
-|------|----------|
-| `tool_calls` 位于 `message.tool_calls`（非 choice 层） | 优先读 `choice.tool_calls` 无数据时降级读 `message.tool_calls` |
-| `reasoning_content` 必须回传 | 通过 Jackson `@JsonProperty` 自动反序列化到 Message 并原样序列化回请求 |
-| `reasoning_content` 可能位于 choice 或 message 层 | 两层级都检查并合并到 Message |
-| `assistant(tool_calls)` 后必须紧跟 `tool` 响应 | `handlePlanConfirm` 在注入"已确认计划"前先移除 orphaned assistant(tool_calls) |
+- 全部使用 **LangChain4j 0.33.x 原生类型**：`ChatMessage`（`SystemMessage` / `UserMessage` / `AiMessage` / `ToolExecutionResultMessage`）、`Response<AiMessage>`、`ToolExecutionRequest`、`ToolSpecification`
+- 已删除旧版自建 DTO：`DeepSeekChatRequest`、`DeepSeekChatResponse`、`Message`、`ToolCall`、`FunctionCall`、`DeepSeekResponseNormalizer`
+- `ConversationStore` 消息通过 `ChatMessageJsonUtil` 序列化（标准 OpenAI 消息格式，Jackson 手动 toMap/fromMap）
+- `ConfirmationStore` pending requests 通过 `List<Map<String,String>>` 序列化（`ToolExecutionRequest` 为 LC4j 不可变类，不可直接 Jackson 序列化）
 
 ### 3.8.1 SubAgent — 子 Agent 执行器
 
@@ -429,24 +422,24 @@ agentChat(conversationId, userMessage)
 ```
 启动时：
   @PostConstruct → 扫描所有 Bean → 收集 @Tool 注解方法
-  → 注册到 Map<String, ToolMeta> → 可生成 DeepSeek JSON Schema㉔
+  → 注册到 Map<String, ToolMeta> → 可生成 LangChain4j ToolSpecification 列表
 
 运行时：
-  execute(toolCall) → 反射调用对应方法 + 10s 超时保护
+  execute(ToolExecutionRequest) → 反射调用对应方法 + 10s 超时保护
   isAutoConfirm(toolName) → 判断是否在白名单中（跳过二次确认㉕）
 ```
 
 ### 3.10 ConversationStore — 会话存储
 
 - 存储位置：Redis㉑ `conversation:{conversationId}`（String 类型 + Jackson JSON）
-- 存储内容：消息历史、checkpoint 轮次、planConfirmed 标志、已批准的操作计划
+- 存储内容：消息历史（ChatMessage 列表通过 `ChatMessageJsonUtil` 序列化为 JSON 字符串）、checkpoint 轮次、planConfirmed 标志、已批准的操作计划
 - 过期策略：Redis TTL 30 分钟，无访问自动过期
 - **降级策略**：Redis 不可用时自动切换 `LocalCache`（1000 条容量上限 / 30 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
 
 ### 3.11 ConfirmationStore — 确认点存储
 
 - 存储位置：Redis㉑ `confirmation:{confirmationId}`（String 类型 + Jackson JSON）
-- 两种类型：plan（操作计划确认）、exec（写操作二次确认）
+- 两种类型：plan（操作计划确认，planToolCalls 存为 `List<Map>`）、exec（写操作二次确认，pendingRequests 通过 `List<Map<String,String>>` 序列化）
 - 过期策略：Redis TTL 5 分钟
 - **降级策略**：Redis 不可用时自动切换 `LocalCache`（500 条容量上限 / 5 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
 
@@ -647,9 +640,8 @@ store:
 | **领域分类** | **LLM 轻量调用（DeepSeek + 简短系统提示）** | **比关键词匹配更准确理解用户意图，比完整 ReAct 更轻量（单次调用）** |
 | **工具召回** | **语义 Embedding（nomic-embed-text）+ 频率衰减补全** | **语义检索找到功能匹配的工具，频率补全兜底冷启动和 Embedding 失败** |
 | **能力校验** | **关键词规则引擎（CapabilityKeywords 中英文 11 组映射）** | **极低延迟（纯内存匹配），拒绝明显不匹配的调用，减少 LLM 幻觉执行** |
-| DeepSeek V4 `reasoning_content` 轮播 | 通过 `@JsonProperty` 自动反序列化到 Message 并原样序列化回请求 | V4 thinking mode 强制要求回传此字段，否则 HTTP 400 |
-| `tool_calls` 位置差异 | 同时检查 `choice.tool_calls` 和 `message.tool_calls` | V4 将 `tool_calls` 放在 message 内部，旧代码只检查 choice 层 |
-| `assistant(tool_calls)` 消息序列 | 注入新消息前先移除 orphaned assistant 消息 | OpenAI-compatible API 要求 tool_calls 后必须紧跟 tool 响应 |
+| **LLM 调用框架** | **LangChain4j 0.33.x OpenAiChatModel** | **替代 RestTemplate + 自定义 DTO，原生支持 tool calling、streaming、多态消息类型，减少自建代码和维护成本** |
+| DeepSeek V4 `reasoning_content` 轮播 | LangChain4j OpenAiChatModel 内部透传非标准字段 | V4 thinking mode 强制要求回传此字段，否则 HTTP 400 |
 | 降级策略 | 组件异常时静默降级 | 不阻塞主流程 |
 
 ---
@@ -679,5 +671,5 @@ store:
 | **LLM API 异常** | **AgentFallback.apiUnavailable()，返回"大脑暂时离线，请稍后再试"** |
 | **Tool 调用返回异常** | **AgentFallback.toolExecutionFailed(name, detail)，异常回送 LLM 决定重试或告知用户** |
 | **CapabilityGuard 校验不通过** | **拒绝执行，错误回送 LLM，由 LLM 修正调用或改用其他方式** |
-| **DeepSeek V4 missing `reasoning_content`** | **400 "reasoning_content must be passed back" → `@JsonProperty` 自动保留并回传** |
-| **DeepSeek V4 orphaned `assistant(tool_calls)`** | **400 "must be followed by tool messages" → 注入新消息前先移除 orphaned assistant** |
+| **DeepSeek V4 missing `reasoning_content`** | **LangChain4j OpenAiChatModel 内部透传非标准字段，确保 reasoning_content 在请求中保留并回传** |
+| **DeepSeek V4 orphaned `assistant(tool_calls)`** | **400 "must be followed by tool messages" → AgentService.removeLastAssistantMessage() 注入新消息前移除 orphaned AiMessage** |

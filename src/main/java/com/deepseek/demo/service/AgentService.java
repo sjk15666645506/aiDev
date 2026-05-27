@@ -1,10 +1,20 @@
 package com.deepseek.demo.service;
 
 import com.deepseek.demo.annotation.ToolDomain;
-import com.deepseek.demo.dto.*;
+import com.deepseek.demo.service.AgentFallback;
+import com.deepseek.demo.dto.AgentResponse;
+import com.deepseek.demo.dto.ConfirmationPoint;
 import com.deepseek.demo.store.ConfirmationStore;
 import com.deepseek.demo.store.IConversationStore;
 import com.deepseek.demo.util.StringUtils;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.data.message.AiMessage;
+import dev.langchain4j.data.message.ChatMessage;
+import dev.langchain4j.data.message.SystemMessage;
+import dev.langchain4j.data.message.ToolExecutionResultMessage;
+import dev.langchain4j.data.message.UserMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -12,19 +22,6 @@ import org.springframework.stereotype.Service;
 import java.util.*;
 import java.util.stream.Collectors;
 
-/**
- * Agent 服务，实现基于 ReAct 循环的自动操作引擎。
- * <p>
- * 核心流程：
- * <ol>
- *   <li>接收用户问题 → RAG 检索知识库 → 拼入 system prompt</li>
- *   <li>调用 DeepSeek API（带 tools）→ LLM 返回 tool_calls 或文本</li>
- *   <li>首次 tool_calls → 生成操作计划确认点，等待用户确认</li>
- *   <li>用户确认后 → 逐个执行 tool（读自动，写按白名单判断）</li>
- *   <li>非白名单写操作 → 二次确认 → 确认后执行 → 结果回 LLM</li>
- *   <li>所有操作完成后 → LLM 汇总最终回答</li>
- * </ol>
- */
 @Service
 public class AgentService {
 
@@ -37,6 +34,7 @@ public class AgentService {
     private final DomainRouter domainRouter;
     private final ToolRetriever toolRetriever;
     private final ReActEngine reActEngine;
+    private final ObjectMapper objectMapper;
 
     public AgentService(IToolRegistry toolRegistry,
                         IConversationStore conversationStore,
@@ -44,7 +42,8 @@ public class AgentService {
                         IVectorSearchService vectorService,
                         DomainRouter domainRouter,
                         ToolRetriever toolRetriever,
-                        ReActEngine reActEngine) {
+                        ReActEngine reActEngine,
+                        ObjectMapper objectMapper) {
         this.toolRegistry = toolRegistry;
         this.conversationStore = conversationStore;
         this.confirmationStore = confirmationStore;
@@ -52,6 +51,7 @@ public class AgentService {
         this.domainRouter = domainRouter;
         this.toolRetriever = toolRetriever;
         this.reActEngine = reActEngine;
+        this.objectMapper = objectMapper;
     }
 
     // ═══════════════════════════════════════════
@@ -73,17 +73,17 @@ public class AgentService {
                     selectedTools.size(),
                     selectedTools.stream().map(ToolMeta::getName).collect(Collectors.toList()));
 
-            List<Message> messages = conversationStore.getMessages(conversationId);
+            List<ChatMessage> messages = conversationStore.getMessages(conversationId);
             if (messages.isEmpty()) {
-                messages.add(new Message(Message.ROLE_SYSTEM, buildSystemPrompt(knowledgeContext)));
+                messages.add(SystemMessage.from(buildSystemPrompt(knowledgeContext)));
             }
 
-            messages.add(new Message(Message.ROLE_USER, userMessage));
+            messages.add(UserMessage.from(userMessage));
 
-            List<Map<String, Object>> toolSchemas = toolRegistry.toJsonSchema(selectedTools);
-            toolSchemas.addAll(toolRegistry.toJsonSchema(
+            List<ToolSpecification> toolSchemas = toolRegistry.toToolSpecifications(selectedTools);
+            toolSchemas.addAll(toolRegistry.toToolSpecifications(
                     toolRegistry.getByDomain(ToolDomain.SYSTEM)));
-            conversationStore.setSelectedToolSchemas(conversationId, toolSchemas);
+            conversationStore.setSelectedToolSpecifications(conversationId, toolSchemas);
 
             return reActEngine.agentLoop(conversationId, messages, toolSchemas);
 
@@ -111,7 +111,7 @@ public class AgentService {
         }
         confirmationStore.consume(confirmationId);
 
-        List<Message> messages = conversationStore.getMessages(conversationId);
+        List<ChatMessage> messages = conversationStore.getMessages(conversationId);
 
         if ("plan".equals(cp.getType())) {
             return handlePlanConfirm(conversationId, messages, cp, confirm, feedback);
@@ -123,7 +123,7 @@ public class AgentService {
     }
 
     private AgentResponse handlePlanConfirm(String conversationId,
-                                             List<Message> messages,
+                                             List<ChatMessage> messages,
                                              ConfirmationStore.ConfirmationState cp,
                                              boolean confirm, String feedback) {
         if (confirm) {
@@ -132,11 +132,11 @@ public class AgentService {
 
             if (feedback != null && !feedback.isEmpty()) {
                 removeLastAssistantMessage(messages);
-                messages.add(new Message(Message.ROLE_USER,
+                messages.add(UserMessage.from(
                         "操作计划已确认，但请按以下调整后执行: " + feedback));
             } else {
                 removeLastAssistantMessage(messages);
-                messages.add(new Message(Message.ROLE_SYSTEM,
+                messages.add(SystemMessage.from(
                         "用户已确认操作计划。请严格按以下计划逐项执行，不得增删改操作。\n" +
                         "已批准的计划:\n" + reActEngine.formatPlan(cp.getPlanToolCalls())));
             }
@@ -144,7 +144,7 @@ public class AgentService {
 
         } else if (feedback != null && !feedback.isEmpty()) {
             removeLastAssistantMessage(messages);
-            messages.add(new Message(Message.ROLE_USER,
+            messages.add(UserMessage.from(
                     "请根据以下意见调整方案: " + feedback));
             return reActEngine.agentLoop(conversationId, messages);
 
@@ -156,15 +156,15 @@ public class AgentService {
     }
 
     private AgentResponse handleExecConfirm(String conversationId,
-                                             List<Message> messages,
+                                             List<ChatMessage> messages,
                                              ConfirmationStore.ConfirmationState cp,
                                              boolean confirm, String feedback) {
         if (!confirm) {
             if (feedback != null && !feedback.isEmpty()) {
                 removeLastAssistantMessage(messages);
-                messages.add(new Message(Message.ROLE_USER,
+                messages.add(UserMessage.from(
                         "请按以下调整后重新执行: " + feedback));
-                appendPendingHint(messages, cp.getPendingToolCalls());
+                appendPendingHint(messages, cp.getPendingRequests(objectMapper));
                 return reActEngine.agentLoop(conversationId, messages);
             }
             conversationStore.clearCheckpoint(conversationId);
@@ -175,32 +175,32 @@ public class AgentService {
 
         if (feedback != null && !feedback.isEmpty()) {
             removeLastAssistantMessage(messages);
-            messages.add(new Message(Message.ROLE_USER,
+            messages.add(UserMessage.from(
                     "确认执行，但请按以下调整: " + feedback));
-            appendPendingHint(messages, cp.getPendingToolCalls());
+            appendPendingHint(messages, cp.getPendingRequests(objectMapper));
             return reActEngine.agentLoop(conversationId, messages);
         }
 
         try {
-            String toolArgs = cp.getToolArguments() != null
-                    ? cp.getToolArguments() : "{}";
-            com.deepseek.demo.dto.ToolCall toolCall = new com.deepseek.demo.dto.ToolCall();
-            toolCall.setId(cp.getToolCallId());
-            FunctionCall func = new FunctionCall(cp.getToolName(), toolArgs);
-            toolCall.setFunction(func);
+            ToolExecutionRequest request = ToolExecutionRequest.builder()
+                    .id(cp.getToolCallId() != null ? cp.getToolCallId() : "")
+                    .name(cp.getToolName() != null ? cp.getToolName() : "")
+                    .arguments(cp.getToolArguments() != null ? cp.getToolArguments() : "{}")
+                    .build();
 
-            String result = toolRegistry.execute(toolCall);
-            messages.add(new Message(Message.ROLE_TOOL, result, cp.getToolCallId()));
+            String result = toolRegistry.execute(request);
+            messages.add(new ToolExecutionResultMessage(
+                    cp.getToolCallId(), cp.getToolName(), result));
             log.info("工具执行完成: tool={}, resultLength={}",
                     cp.getToolName(), result.length());
 
-            appendPendingHint(messages, cp.getPendingToolCalls());
+            appendPendingHint(messages, cp.getPendingRequests(objectMapper));
             return reActEngine.agentLoop(conversationId, messages);
 
         } catch (Exception e) {
             log.error("工具执行失败: tool={}", cp.getToolName(), e);
-            messages.add(new Message(Message.ROLE_TOOL,
-                    AgentFallback.toolExecutionFailed(cp.getToolName(), e.getMessage()), cp.getToolCallId()));
+            messages.add(new ToolExecutionResultMessage(cp.getToolCallId(), cp.getToolName(),
+                    AgentFallback.toolExecutionFailed(cp.getToolName(), e.getMessage())));
             return reActEngine.agentLoop(conversationId, messages);
         }
     }
@@ -250,24 +250,23 @@ public class AgentService {
     //  Message Helpers
     // ═══════════════════════════════════════════
 
-    private void removeLastAssistantMessage(List<Message> messages) {
+    private void removeLastAssistantMessage(List<ChatMessage> messages) {
         for (int i = messages.size() - 1; i >= 0; i--) {
-            if (Message.ROLE_ASSISTANT.equals(messages.get(i).getRole())) {
+            if (messages.get(i) instanceof AiMessage) {
                 messages.remove(i);
                 return;
             }
         }
     }
 
-    private void appendPendingHint(List<Message> messages,
-                                    List<com.deepseek.demo.dto.ToolCall> pendingToolCalls) {
-        if (pendingToolCalls != null && !pendingToolCalls.isEmpty()) {
+    private void appendPendingHint(List<ChatMessage> messages,
+                                    List<ToolExecutionRequest> pendingRequests) {
+        if (pendingRequests != null && !pendingRequests.isEmpty()) {
             StringBuilder sb = new StringBuilder("上一步已完成。你还需继续执行以下操作:\n");
-            for (int i = 0; i < pendingToolCalls.size(); i++) {
-                String name = pendingToolCalls.get(i).getFunction().getName();
-                sb.append(i + 1).append(". ").append(name).append("\n");
+            for (int i = 0; i < pendingRequests.size(); i++) {
+                sb.append(i + 1).append(". ").append(pendingRequests.get(i).name()).append("\n");
             }
-            messages.add(new Message(Message.ROLE_SYSTEM, sb.toString()));
+            messages.add(SystemMessage.from(sb.toString()));
         }
     }
 }

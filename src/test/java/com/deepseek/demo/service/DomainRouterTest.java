@@ -14,7 +14,7 @@ import static org.mockito.Mockito.*;
 class DomainRouterTest {
 
     @MockBean
-    private DeepSeekService deepSeekService;
+    private ILlmService deepSeekService;
 
     @Autowired
     private DomainRouter router;

@@ -4,9 +4,11 @@ import com.deepseek.demo.annotation.ActionType;
 import com.deepseek.demo.annotation.Tool;
 import com.deepseek.demo.annotation.ToolDomain;
 import com.deepseek.demo.annotation.ToolParam;
-import com.deepseek.demo.dto.ToolCall;
 import com.deepseek.demo.util.StringUtils;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolParameters;
+import dev.langchain4j.agent.tool.ToolSpecification;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -176,14 +178,7 @@ public class ToolRegistry implements IToolRegistry, ApplicationContextAware, App
      * @return JSON Schema 列表
      */
     public List<Map<String, Object>> toJsonSchema() {
-        List<Map<String, Object>> schemas = new ArrayList<>();
-
-        for (ToolMeta meta : tools.values()) {
-            Map<String, Object> schema = buildJsonSchema(meta);
-            schemas.add(schema);
-        }
-
-        return schemas;
+        return toJsonSchema(new ArrayList<>(tools.values()));
     }
 
     /**
@@ -204,38 +199,84 @@ public class ToolRegistry implements IToolRegistry, ApplicationContextAware, App
     }
 
     /**
-     * 为单个工具构建 JSON Schema
+     * 将所有已注册的工具转换为 LangChain4j {@link ToolSpecification} 列表。
+     * <p>
+     * 直接生成 LangChain4j 原生工具规格，Phase 3 中 ReActEngine → AiServices
+     * 迁移时将直接使用此方法，跳过 Map 中间格式。
+     *
+     * @return ToolSpecification 列表
      */
-    private Map<String, Object> buildJsonSchema(ToolMeta meta) {
-        Map<String, Object> function = new HashMap<>();
-        function.put("name", meta.getName());
-        function.put("description", meta.getDescription());
+    public List<ToolSpecification> toToolSpecifications() {
+        return toToolSpecifications(new ArrayList<>(tools.values()));
+    }
 
-        Map<String, Object> parameters = new HashMap<>();
-        parameters.put("type", "object");
+    /**
+     * 将指定工具列表转换为 LangChain4j {@link ToolSpecification} 列表。
+     *
+     * @param toolMetas 要转换的工具元数据列表
+     * @return ToolSpecification 列表
+     */
+    public List<ToolSpecification> toToolSpecifications(List<ToolMeta> toolMetas) {
+        if (toolMetas == null || toolMetas.isEmpty()) return Collections.emptyList();
+        List<ToolSpecification> specs = new ArrayList<>(toolMetas.size());
+        for (ToolMeta meta : toolMetas) {
+            specs.add(toToolSpecification(meta));
+        }
+        return specs;
+    }
 
-        // 构建 properties
-        Map<String, Object> properties = new HashMap<>();
+    /**
+     * 将单个工具元数据转换为 LangChain4j {@link ToolSpecification}。
+     */
+    private ToolSpecification toToolSpecification(ToolMeta meta) {
+        ToolSpecification.Builder builder = ToolSpecification.builder()
+                .name(meta.getName())
+                .description(meta.getDescription());
+
+        ToolParameters.Builder tpBuilder = ToolParameters.builder()
+                .type("object");
+
+        Map<String, Map<String, Object>> propsMap = new LinkedHashMap<>();
         for (Map<String, Object> param : meta.getParameters()) {
             String paramName = (String) param.get("name");
-            Map<String, Object> property = new HashMap<>();
-            property.put("type", param.get("type"));
-            property.put("description", param.get("description"));
-            properties.put(paramName, property);
+            Map<String, Object> prop = new LinkedHashMap<>();
+            prop.put("type", param.get("type"));
+            prop.put("description", param.get("description"));
+            propsMap.put(paramName, prop);
         }
-        parameters.put("properties", properties);
+        tpBuilder.properties(propsMap);
 
-        // 构建 required
         if (!meta.getRequiredParams().isEmpty()) {
-            parameters.put("required", new ArrayList<>(meta.getRequiredParams()));
+            tpBuilder.required(new ArrayList<>(meta.getRequiredParams()));
         }
 
+        builder.parameters(tpBuilder.build());
+        return builder.build();
+    }
+
+    /**
+     * 为单个工具构建 JSON Schema（委托给 LangChain4j ToolSpecification）。
+     */
+    private Map<String, Object> buildJsonSchema(ToolMeta meta) {
+        ToolSpecification spec = toToolSpecification(meta);
+        ToolParameters tp = spec.parameters();
+
+        Map<String, Object> function = new LinkedHashMap<>();
+        function.put("name", spec.name());
+        function.put("description", spec.description());
+
+        Map<String, Object> parameters = new LinkedHashMap<>();
+        parameters.put("type", tp.type());
+        parameters.put("properties", tp.properties() != null
+                ? new LinkedHashMap<>(tp.properties()) : new LinkedHashMap<>());
+        if (tp.required() != null && !tp.required().isEmpty()) {
+            parameters.put("required", tp.required());
+        }
         function.put("parameters", parameters);
 
-        Map<String, Object> schema = new HashMap<>();
+        Map<String, Object> schema = new LinkedHashMap<>();
         schema.put("type", "function");
         schema.put("function", function);
-
         return schema;
     }
 
@@ -296,17 +337,18 @@ public class ToolRegistry implements IToolRegistry, ApplicationContextAware, App
      * @throws IllegalArgumentException 如果工具不存在或参数解析失败
      * @throws RuntimeException 如果工具执行超时（重试耗尽）或非可重试异常
      */
-    public String execute(ToolCall toolCall) {
-        String toolName = toolCall.getFunction().getName();
+    @Override
+    public String execute(ToolExecutionRequest request) {
+        String toolName = request.name();
         log.info("执行工具: name={}, arguments={}", toolName,
-                StringUtils.truncate(toolCall.getFunction().getArguments(), 100));
+                StringUtils.truncate(request.arguments(), 100));
 
         ToolMeta meta = getTool(toolName);
 
         // 解析 JSON 参数
         Map<String, Object> args;
         try {
-            args = objectMapper.readValue(toolCall.getFunction().getArguments(),
+            args = objectMapper.readValue(request.arguments(),
                     objectMapper.getTypeFactory().constructMapType(Map.class, String.class, Object.class));
         } catch (Exception e) {
             throw new IllegalArgumentException("工具参数解析失败: " + e.getMessage(), e);

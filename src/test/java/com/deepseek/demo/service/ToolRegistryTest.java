@@ -3,14 +3,15 @@ package com.deepseek.demo.service;
 import com.deepseek.demo.annotation.ActionType;
 import com.deepseek.demo.annotation.Tool;
 import com.deepseek.demo.annotation.ToolParam;
-import com.deepseek.demo.dto.ToolCall;
-import com.deepseek.demo.dto.FunctionCall;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
 import org.springframework.context.annotation.Bean;
 
+import dev.langchain4j.agent.tool.ToolParameters;
+import dev.langchain4j.agent.tool.ToolSpecification;
 import java.util.List;
 import java.util.Map;
 
@@ -205,6 +206,59 @@ class ToolRegistryTest {
         assertFalse(parameters.containsKey("required"));
     }
 
+    // ==================== LangChain4j ToolSpecification 生成 ====================
+
+    @Test
+    void toToolSpecifications_ShouldReturnCorrectCount() {
+        List<dev.langchain4j.agent.tool.ToolSpecification> specs = toolRegistry.toToolSpecifications();
+        List<Map<String, Object>> schemas = toolRegistry.toJsonSchema();
+
+        assertEquals(schemas.size(), specs.size(), "ToolSpecification 数量应与 JSON Schema 一致");
+    }
+
+    @Test
+    void toToolSpecification_ShouldHaveCorrectStructure() {
+        List<dev.langchain4j.agent.tool.ToolSpecification> specs = toolRegistry.toToolSpecifications();
+
+        // 找到 test_greet
+        dev.langchain4j.agent.tool.ToolSpecification greetSpec = null;
+        for (dev.langchain4j.agent.tool.ToolSpecification spec : specs) {
+            if ("test_greet".equals(spec.name())) {
+                greetSpec = spec;
+                break;
+            }
+        }
+        assertNotNull(greetSpec, "应包含 test_greet");
+        assertEquals("向指定用户发送问候", greetSpec.description());
+
+        dev.langchain4j.agent.tool.ToolParameters params = greetSpec.parameters();
+        assertNotNull(params);
+        assertEquals("object", params.type());
+
+        Map<String, Map<String, Object>> props = params.properties();
+        assertTrue(props.containsKey("name"));
+        assertTrue(props.containsKey("greeting"));
+
+        List<String> required = params.required();
+        assertEquals(1, required.size());
+        assertEquals("name", required.get(0));
+    }
+
+    @Test
+    void toToolSpecification_ShouldHandleNoParameterTool() {
+        List<dev.langchain4j.agent.tool.ToolSpecification> specs = toolRegistry.toToolSpecifications();
+
+        dev.langchain4j.agent.tool.ToolSpecification timeSpec = null;
+        for (dev.langchain4j.agent.tool.ToolSpecification spec : specs) {
+            if ("test_get_time".equals(spec.name())) {
+                timeSpec = spec;
+                break;
+            }
+        }
+        assertNotNull(timeSpec, "应包含 test_get_time");
+        assertTrue(timeSpec.parameters().properties().isEmpty());
+    }
+
     // ==================== 白名单校验 ====================
 
     @Test
@@ -227,61 +281,64 @@ class ToolRegistryTest {
 
     @Test
     void execute_ShouldInvokeMethodAndReturnResult() {
-        // 构造 ToolCall：调用 test_greet，提供 name 和 greeting 参数
-        FunctionCall function = new FunctionCall("test_greet",
-                "{\"name\":\"张三\",\"greeting\":\"你好\"}");
-        ToolCall toolCall = new ToolCall("call_1", "function", function);
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call_1")
+                .name("test_greet")
+                .arguments("{\"name\":\"张三\",\"greeting\":\"你好\"}")
+                .build();
 
-        String result = toolRegistry.execute(toolCall);
+        String result = toolRegistry.execute(request);
         assertEquals("你好, 张三!", result);
     }
 
     @Test
     void execute_ShouldHandleDefaultValue_WhenOptionalParamMissing() {
-        // 只提供 name，不提供 greeting（可选参数）
-        FunctionCall function = new FunctionCall("test_greet",
-                "{\"name\":\"World\"}");
-        ToolCall toolCall = new ToolCall("call_2", "function", function);
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call_2")
+                .name("test_greet")
+                .arguments("{\"name\":\"World\"}")
+                .build();
 
-        String result = toolRegistry.execute(toolCall);
+        String result = toolRegistry.execute(request);
         assertEquals("Hello, World!", result);
     }
 
     @Test
     void execute_ShouldHandleNoParameterTool() {
-        // 调用无参数工具 test_get_time
-        FunctionCall function = new FunctionCall("test_get_time",
-                "{}");
-        ToolCall toolCall = new ToolCall("call_3", "function", function);
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call_3")
+                .name("test_get_time")
+                .arguments("{}")
+                .build();
 
-        String result = toolRegistry.execute(toolCall);
+        String result = toolRegistry.execute(request);
         assertEquals("2026-05-13 12:00:00", result);
     }
 
     @Test
     void execute_ShouldThrowException_WhenToolNotFound() {
-        FunctionCall function = new FunctionCall("non_existent_tool",
-                "{}");
-        ToolCall toolCall = new ToolCall("call_4", "function", function);
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call_4")
+                .name("non_existent_tool")
+                .arguments("{}")
+                .build();
 
         RuntimeException exception = assertThrows(RuntimeException.class,
-                () -> toolRegistry.execute(toolCall));
-        // 内部会先抛出 IllegalArgumentException（getTool 报错），
-        // 但实际被 RuntimeException 包装
+                () -> toolRegistry.execute(request));
         assertTrue(exception.getMessage().contains("non_existent_tool") ||
                 exception.getCause() instanceof IllegalArgumentException);
     }
 
     @Test
     void execute_ShouldThrowException_WhenArgsParseFails() {
-        // 传入非法 JSON
-        FunctionCall function = new FunctionCall("test_greet",
-                "{invalid json}");
-        ToolCall toolCall = new ToolCall("call_5", "function", function);
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call_5")
+                .name("test_greet")
+                .arguments("{invalid json}")
+                .build();
 
-        // 参数解析失败抛出 IllegalArgumentException
         assertThrows(IllegalArgumentException.class,
-                () -> toolRegistry.execute(toolCall));
+                () -> toolRegistry.execute(request));
     }
 
     // ==================== 辅助方法 ====================

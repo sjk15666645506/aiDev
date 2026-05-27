@@ -1,47 +1,36 @@
 package com.deepseek.demo.store;
 
-import com.deepseek.demo.dto.ToolCall;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.StringRedisTemplate;
 import org.springframework.stereotype.Component;
 
-import org.springframework.beans.factory.annotation.Value;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 
-/**
- * 确认点存储器（Redis 实现），按 confirmationId 存储用户确认点状态。
- * <p>
- * 使用 Redis String 存储序列化后的 ConfirmationState JSON，
- * 利用 Redis TTL（5 分钟）自动清理过期确认点，无需定时任务。
- * key 格式：{@code confirmation:{confirmationId}}
- * <p>
- * plan 类型存储 LLM 提议的完整操作计划，exec 类型存储单个写工具调用及其参数。
- */
 @Component
 public class ConfirmationStore {
 
     private static final Logger log = LoggerFactory.getLogger(ConfirmationStore.class);
 
-    /** Redis key 前缀 */
     private static final String KEY_PREFIX = "confirmation:";
-
-    /** 确认点过期时间：5 分钟无操作即视为过期 */
     private static final long EXPIRATION_MINUTES = 5;
 
     private final StringRedisTemplate redisTemplate;
     private final ObjectMapper objectMapper;
 
-    /** Redis 不可用时的本地缓存降级（TTL + 容量上限） */
     private final LocalCache<String, ConfirmationState> localCache;
-
-    /** Redis 是否处于降级模式 */
     private volatile boolean redisDegraded = false;
 
     public ConfirmationStore(StringRedisTemplate redisTemplate, ObjectMapper objectMapper,
@@ -52,38 +41,62 @@ public class ConfirmationStore {
         this.localCache = new LocalCache<>(maxCapacity, ttlMinutes, TimeUnit.MINUTES);
     }
 
-    /**
-     * 确认点状态，存储单个确认点的完整上下文信息。
-     * <p>
-     * 使用 public static 修饰，以便 AgentService 等外部类直接访问和判读状态。
-     */
     public static class ConfirmationState {
-        /** 关联的对话会话 ID */
         private String conversationId;
-        /** 确认点类型：plan（计划确认）或 exec（写操作二次确认） */
         private String type;
-        /** plan 类型：LLM 提议的完整操作列表 */
         private List<Map<String, Object>> planToolCalls;
-        /** exec 类型：要执行的工具名称 */
         private String toolName;
-        /** exec 类型：原始 tool_call 的 ID */
         private String toolCallId;
-        /**
-         * exec 类型：工具参数的 JSON 字符串。
-         * 跨确认边界保留原始 JSON 参数，避免反序列化/再序列化造成精度丢失。
-         */
         private String toolArguments;
-        /** exec 类型：待执行的 tool_call 列表（包含当前调用及其后续调用） */
-        private List<ToolCall> pendingToolCalls;
-        /** 创建时间戳（毫秒） */
+        /** JSON string of pending ToolExecutionRequest list (Map-based for Jackson compat) */
+        private String pendingRequestsJson = "[]";
         private long createdAt;
-        /** 是否已被消费（确认或拒绝后标记） */
         private boolean consumed;
 
         public ConfirmationState() {
             this.createdAt = System.currentTimeMillis();
         }
 
+        @JsonIgnore
+        public List<ToolExecutionRequest> getPendingRequests(ObjectMapper om) {
+            if (pendingRequestsJson == null || pendingRequestsJson.isEmpty()) return Collections.emptyList();
+            try {
+                List<Map<String, Object>> maps = om.readValue(pendingRequestsJson,
+                        new TypeReference<List<Map<String, Object>>>() {});
+                List<ToolExecutionRequest> requests = new ArrayList<>();
+                for (Map<String, Object> m : maps) {
+                    requests.add(ToolExecutionRequest.builder()
+                            .id((String) m.get("id"))
+                            .name((String) m.get("name"))
+                            .arguments((String) m.getOrDefault("arguments", "{}"))
+                            .build());
+                }
+                return requests;
+            } catch (Exception e) {
+                log.warn("反序列化 pending requests 失败", e);
+                return Collections.emptyList();
+            }
+        }
+
+        @JsonIgnore
+        public void setPendingRequests(List<ToolExecutionRequest> requests, ObjectMapper om) {
+            try {
+                List<Map<String, String>> maps = new ArrayList<>();
+                for (ToolExecutionRequest req : requests) {
+                    Map<String, String> m = new java.util.LinkedHashMap<>();
+                    m.put("id", req.id());
+                    m.put("name", req.name());
+                    m.put("arguments", req.arguments());
+                    maps.add(m);
+                }
+                this.pendingRequestsJson = om.writeValueAsString(maps);
+            } catch (JsonProcessingException e) {
+                log.error("序列化 pending requests 失败", e);
+                this.pendingRequestsJson = "[]";
+            }
+        }
+
+        // Getters and setters
         public String getConversationId() { return conversationId; }
         public void setConversationId(String conversationId) { this.conversationId = conversationId; }
         public String getType() { return type; }
@@ -96,26 +109,18 @@ public class ConfirmationStore {
         public void setToolCallId(String toolCallId) { this.toolCallId = toolCallId; }
         public String getToolArguments() { return toolArguments; }
         public void setToolArguments(String toolArguments) { this.toolArguments = toolArguments; }
-        public List<ToolCall> getPendingToolCalls() { return pendingToolCalls; }
-        public void setPendingToolCalls(List<ToolCall> pendingToolCalls) { this.pendingToolCalls = pendingToolCalls; }
+        public String getPendingRequestsJson() { return pendingRequestsJson; }
+        public void setPendingRequestsJson(String pendingRequestsJson) { this.pendingRequestsJson = pendingRequestsJson; }
         public long getCreatedAt() { return createdAt; }
         public void setCreatedAt(long createdAt) { this.createdAt = createdAt; }
         public boolean isConsumed() { return consumed; }
         public void setConsumed(boolean consumed) { this.consumed = consumed; }
     }
 
-    /** 构建 Redis key */
     private String key(String confirmationId) {
         return KEY_PREFIX + confirmationId;
     }
 
-    /**
-     * 创建 plan 类型确认点。
-     *
-     * @param conversationId 关联的对话会话 ID
-     * @param plan           LLM 提议的完整操作列表
-     * @return 确认点唯一标识（UUID 字符串）
-     */
     public String createPlanConfirmation(String conversationId, List<Map<String, Object>> plan) {
         ConfirmationState state = new ConfirmationState();
         state.setConversationId(conversationId);
@@ -124,33 +129,20 @@ public class ConfirmationStore {
         return saveConfirmation(state);
     }
 
-    /**
-     * 创建 exec 类型确认点。
-     *
-     * @param conversationId  关联的对话会话 ID
-     * @param toolCall        待确认的单个工具调用
-     * @param pendingToolCalls 待执行的 tool_call 列表（包含当前调用）
-     * @return 确认点唯一标识（UUID 字符串）
-     */
-    public String createExecConfirmation(String conversationId, ToolCall toolCall,
-                                          List<ToolCall> pendingToolCalls) {
+    public String createExecConfirmation(String conversationId, ToolExecutionRequest toolCall,
+                                          List<ToolExecutionRequest> pendingToolCalls) {
         ConfirmationState state = new ConfirmationState();
         state.setConversationId(conversationId);
         state.setType("exec");
         if (toolCall != null) {
-            state.setToolName(toolCall.getFunction() != null ? toolCall.getFunction().getName() : null);
-            state.setToolCallId(toolCall.getId());
-            state.setToolArguments(toolCall.getFunction() != null ? toolCall.getFunction().getArguments() : null);
+            state.setToolName(toolCall.name());
+            state.setToolCallId(toolCall.id());
+            state.setToolArguments(toolCall.arguments());
         }
-        state.setPendingToolCalls(pendingToolCalls);
+        state.setPendingRequests(pendingToolCalls, objectMapper);
         return saveConfirmation(state);
     }
 
-    /**
-     * 序列化确认点并写入 Redis，设置 TTL。
-     *
-     * @return 确认点唯一标识
-     */
     private String saveConfirmation(ConfirmationState state) {
         String confirmationId = UUID.randomUUID().toString();
         try {
@@ -179,12 +171,6 @@ public class ConfirmationStore {
         }
     }
 
-    /**
-     * 获取指定确认点的状态。
-     *
-     * @param confirmationId 确认点 ID
-     * @return ConfirmationState 对象，已过期或不存在则返回 null
-     */
     public ConfirmationState get(String confirmationId) {
         try {
             String json = redisTemplate.opsForValue().get(key(confirmationId));
@@ -208,11 +194,6 @@ public class ConfirmationStore {
         }
     }
 
-    /**
-     * 消费指定确认点，将其标记为已消费并写回 Redis。
-     *
-     * @param confirmationId 确认点 ID
-     */
     public void consume(String confirmationId) {
         ConfirmationState state = get(confirmationId);
         if (state != null) {
@@ -237,12 +218,6 @@ public class ConfirmationStore {
         }
     }
 
-    /**
-     * 检查指定确认点是否已被消费。
-     *
-     * @param confirmationId 确认点 ID
-     * @return 已消费返回 true，不存在或未消费返回 false
-     */
     public boolean isConsumed(String confirmationId) {
         ConfirmationState state = get(confirmationId);
         return state != null && state.isConsumed();

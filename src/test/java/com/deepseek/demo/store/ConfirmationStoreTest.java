@@ -1,7 +1,7 @@
 package com.deepseek.demo.store;
 
-import com.deepseek.demo.dto.FunctionCall;
-import com.deepseek.demo.dto.ToolCall;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import com.deepseek.demo.store.ConfirmationStore.ConfirmationState;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
@@ -13,11 +13,6 @@ import java.util.*;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/**
- * ConfirmationStore 的集成测试（Redis 后端）。
- * 覆盖 plan/exec 确认点的创建、获取和消费功能。
- * 过期清理由 Redis TTL 自动完成，不在此处测试。
- */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE)
 class ConfirmationStoreTest {
 
@@ -27,7 +22,9 @@ class ConfirmationStoreTest {
     @Autowired
     private StringRedisTemplate redisTemplate;
 
-    /** 清理测试数据 */
+    @Autowired
+    private ObjectMapper objectMapper;
+
     @AfterEach
     void tearDown() {
         Set<String> keys = redisTemplate.keys("confirmation:*");
@@ -58,11 +55,14 @@ class ConfirmationStoreTest {
 
     @Test
     void shouldCreateExecConfirmation() {
-        FunctionCall functionCall = new FunctionCall("createTask", "{\"title\":\"测试\"}");
-        ToolCall toolCall = new ToolCall("call_123", "function", functionCall);
-        List<ToolCall> pendingToolCalls = Arrays.asList(toolCall);
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call_123")
+                .name("createTask")
+                .arguments("{\"title\":\"测试\"}")
+                .build();
+        List<ToolExecutionRequest> pendingRequests = Arrays.asList(request);
 
-        String confirmationId = store.createExecConfirmation("conv-1", toolCall, pendingToolCalls);
+        String confirmationId = store.createExecConfirmation("conv-1", request, pendingRequests);
         assertNotNull(confirmationId);
 
         ConfirmationState state = store.get(confirmationId);
@@ -72,7 +72,7 @@ class ConfirmationStoreTest {
         assertEquals("createTask", state.getToolName());
         assertEquals("call_123", state.getToolCallId());
         assertEquals("{\"title\":\"测试\"}", state.getToolArguments());
-        assertEquals(1, state.getPendingToolCalls().size());
+        assertEquals(1, state.getPendingRequests(objectMapper).size());
         assertFalse(state.isConsumed());
     }
 
@@ -106,9 +106,9 @@ class ConfirmationStoreTest {
     void shouldHandleMultipleConfirmations() {
         String planId = store.createPlanConfirmation("conv-1",
                 Arrays.asList(Collections.singletonMap("action", "plan1")));
-        String execId = store.createExecConfirmation("conv-1",
-                new ToolCall("call_1", "function", new FunctionCall("tool1", "{}")),
-                new ArrayList<>());
+        ToolExecutionRequest req = ToolExecutionRequest.builder()
+                .id("call_1").name("tool1").arguments("{}").build();
+        String execId = store.createExecConfirmation("conv-1", req, new ArrayList<>());
 
         assertNotNull(store.get(planId));
         assertNotNull(store.get(execId));
@@ -129,8 +129,9 @@ class ConfirmationStoreTest {
 
     @Test
     void shouldCreateExecConfirmationWithToolCallHavingNullFunction() {
-        ToolCall toolCall = new ToolCall("call_456", "function", null);
-        String confirmationId = store.createExecConfirmation("conv-1", toolCall, new ArrayList<>());
+        ToolExecutionRequest request = ToolExecutionRequest.builder()
+                .id("call_456").name(null).arguments(null).build();
+        String confirmationId = store.createExecConfirmation("conv-1", request, new ArrayList<>());
 
         ConfirmationState state = store.get(confirmationId);
         assertNotNull(state);

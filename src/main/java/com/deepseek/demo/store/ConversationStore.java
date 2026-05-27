@@ -1,51 +1,40 @@
 package com.deepseek.demo.store;
 
-import com.deepseek.demo.dto.Message;
+import com.deepseek.demo.util.ChatMessageJsonUtil;
 import com.fasterxml.jackson.annotation.JsonAutoDetect;
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import dev.langchain4j.agent.tool.ToolSpecification;
+import dev.langchain4j.data.message.ChatMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.dao.DataAccessException;
 import org.springframework.data.redis.RedisConnectionFailureException;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Component;
 
-import org.springframework.beans.factory.annotation.Value;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
-/**
- * 会话上下文存储器（Redis 实现），按 conversationId 存储对话状态。
- * <p>
- * 使用 Redis String 存储序列化后的 ConversationState JSON，
- * 利用 Redis TTL（30 分钟）自动清理过期会话，无需定时任务。
- * key 格式：{@code conversation:{conversationId}}
- */
 @Component
 public class ConversationStore implements IConversationStore {
 
     private static final Logger log = LoggerFactory.getLogger(ConversationStore.class);
 
-    /** Redis key 前缀 */
     private static final String KEY_PREFIX = "conversation:";
-
-    /** 会话过期时间：30 分钟无访问即视为过期 */
     private static final long EXPIRATION_MINUTES = 30;
 
     private final RedisTemplate<String, String> redisTemplate;
     private final ObjectMapper objectMapper;
 
-    /** Redis 不可用时的本地缓存降级（TTL + 容量上限） */
     private final LocalCache<String, ConversationState> localCache;
-
-    /** Redis 是否处于降级模式 */
     private volatile boolean redisDegraded = false;
 
-    /** 按 conversationId 分锁，防止同一会话的并发 load-modify-save 丢失更新 */
     private final ConcurrentHashMap<String, Object> locks = new ConcurrentHashMap<>();
 
     private Object lockFor(String conversationId) {
@@ -60,42 +49,63 @@ public class ConversationStore implements IConversationStore {
         this.localCache = new LocalCache<>(maxCapacity, ttlMinutes, TimeUnit.MINUTES);
     }
 
-    /**
-     * 会话状态内部类，存储单个会话的所有上下文信息。
-     */
     @JsonAutoDetect(fieldVisibility = JsonAutoDetect.Visibility.ANY)
     static class ConversationState {
-        /** 对话消息列表 */
-        List<Message> messages = new ArrayList<>();
-        /** 检查点迭代次数，用于支持回滚到指定轮次 */
+        /** 对话消息 JSON 字符串（使用标准 OpenAI 格式） */
+        String messagesJson = "[]";
         int checkpoint = 0;
-        /** 计划是否已获得用户确认 */
         boolean planConfirmed = false;
-        /** 用户已审批的操作计划 */
         Object approvedPlan = null;
-        /** 当前会话选中的工具 schemas（用于确认回调时恢复） */
-        Object selectedToolSchemas = null;
-        /** 追踪 ID，贯穿 chat→confirm 多轮交互 */
+        /** 当前会话选中的工具 schemas JSON */
+        String selectedToolSchemasJson = "[]";
         String traceId = null;
-        /** 最后访问时间戳（毫秒） */
         long lastAccessTime = System.currentTimeMillis();
+
+        @JsonIgnore
+        List<ChatMessage> getMessages(ObjectMapper om) {
+            try {
+                return ChatMessageJsonUtil.fromJson(messagesJson, om);
+            } catch (Exception e) {
+                log.warn("消息反序列化失败，返回空列表", e);
+                return new ArrayList<>();
+            }
+        }
+
+        @JsonIgnore
+        void setMessages(List<ChatMessage> messages, ObjectMapper om) {
+            this.messagesJson = ChatMessageJsonUtil.toJson(messages, om);
+        }
+
+        @JsonIgnore
+        @SuppressWarnings("unchecked")
+        List<ToolSpecification> getSelectedToolSpecs(ObjectMapper om) {
+            try {
+                return om.readValue(selectedToolSchemasJson,
+                        om.getTypeFactory().constructCollectionType(List.class, ToolSpecification.class));
+            } catch (Exception e) {
+                log.warn("工具 schemas 反序列化失败，返回空列表", e);
+                return new ArrayList<>();
+            }
+        }
+
+        @JsonIgnore
+        void setSelectedToolSpecs(List<ToolSpecification> specs, ObjectMapper om) {
+            try {
+                this.selectedToolSchemasJson = om.writeValueAsString(specs);
+            } catch (JsonProcessingException e) {
+                log.error("工具 schemas 序列化失败", e);
+                this.selectedToolSchemasJson = "[]";
+            }
+        }
     }
 
-    /** 构建 Redis key */
     private String key(String conversationId) {
         return KEY_PREFIX + conversationId;
     }
 
-    /**
-     * 从 Redis 读取并反序列化会话状态。
-     *
-     * @param conversationId 会话 ID
-     * @return ConversationState 对象，不存在时返回空状态
-     */
     private ConversationState load(String conversationId) {
         try {
             String json = redisTemplate.opsForValue().get(key(conversationId));
-            // Redis 操作成功，如果之前处于降级模式则恢复
             if (redisDegraded) {
                 redisDegraded = false;
                 log.warn("Redis 已恢复，退出本地缓存降级模式");
@@ -113,7 +123,6 @@ public class ConversationStore implements IConversationStore {
             if (local != null) {
                 return local;
             }
-            // 缓存 miss 或已过期，返回空状态
             ConversationState fresh = new ConversationState();
             localCache.put(conversationId, fresh);
             return fresh;
@@ -123,16 +132,12 @@ public class ConversationStore implements IConversationStore {
         }
     }
 
-    /**
-     * 将会话状态序列化并写入 Redis，同时设置 TTL。
-     */
     private void save(String conversationId, ConversationState state) {
         state.lastAccessTime = System.currentTimeMillis();
         try {
             String json = objectMapper.writeValueAsString(state);
             redisTemplate.opsForValue().set(key(conversationId), json,
                     EXPIRATION_MINUTES, TimeUnit.MINUTES);
-            // Redis 操作成功，如果之前处于降级模式则恢复
             if (redisDegraded) {
                 redisDegraded = false;
                 log.warn("Redis 已恢复，退出本地缓存降级模式");
@@ -148,23 +153,16 @@ public class ConversationStore implements IConversationStore {
         }
     }
 
-    /**
-     * 清除本地缓存中指定会话（用在显式关闭会话时）
-     */
     public void removeLocal(String conversationId) {
         localCache.remove(conversationId);
     }
 
-    /**
-     * 获取指定会话的消息列表。
-     *
-     * @param conversationId 会话 ID
-     * @return 消息列表，会话不存在时返回空列表
-     */
-    public List<Message> getMessages(String conversationId) {
+    @Override
+    public List<ChatMessage> getMessages(String conversationId) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);
-            if (state.messages.isEmpty()) {
+            List<ChatMessage> messages = state.getMessages(objectMapper);
+            if (messages.isEmpty()) {
                 if (!redisDegraded) {
                     try {
                         redisTemplate.expire(key(conversationId), EXPIRATION_MINUTES, TimeUnit.MINUTES);
@@ -176,46 +174,31 @@ public class ConversationStore implements IConversationStore {
             } else {
                 save(conversationId, state);
             }
-            return state.messages;
+            return messages;
         }
     }
 
-    /**
-     * 保存指定会话的消息列表。
-     *
-     * @param conversationId 会话 ID
-     * @param messages       要保存的消息列表
-     */
-    public void saveMessages(String conversationId, List<Message> messages) {
+    @Override
+    public void saveMessages(String conversationId, List<ChatMessage> messages) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);
-            state.messages = messages;
+            state.setMessages(messages, objectMapper);
             save(conversationId, state);
         }
     }
 
-    /**
-     * 保存检查点：同时保存消息列表和检查点迭代次数。
-     *
-     * @param conversationId 会话 ID
-     * @param messages       要保存的消息列表
-     * @param iteration      当前迭代次数（检查点标识）
-     */
-    public void saveCheckpoint(String conversationId, List<Message> messages, int iteration) {
+    @Override
+    public void saveCheckpoint(String conversationId, List<ChatMessage> messages, int iteration) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);
-            state.messages = messages;
+            state.setMessages(messages, objectMapper);
             state.checkpoint = iteration;
             save(conversationId, state);
             log.debug("会话 {} 检查点已保存，迭代次数={}", conversationId, iteration);
         }
     }
 
-    /**
-     * 清除指定会话的检查点，将迭代次数重置为 0。
-     *
-     * @param conversationId 会话 ID
-     */
+    @Override
     public void clearCheckpoint(String conversationId) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);
@@ -225,24 +208,13 @@ public class ConversationStore implements IConversationStore {
         }
     }
 
-    /**
-     * 获取指定会话的计划确认状态。
-     *
-     * @param conversationId 会话 ID
-     * @return 如果计划已确认则返回 true，否则返回 false
-     */
+    @Override
     public boolean getPlanConfirmed(String conversationId) {
         ConversationState state = load(conversationId);
         return state.planConfirmed;
     }
 
-    /**
-     * 设置指定会话的计划确认状态。
-     *
-     * @param conversationId 会话 ID
-     * @param confirmed      是否已确认
-     * @return 设置前的确认状态
-     */
+    @Override
     public boolean setPlanConfirmed(String conversationId, boolean confirmed) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);
@@ -254,24 +226,14 @@ public class ConversationStore implements IConversationStore {
         }
     }
 
-    /**
-     * 获取指定会话已审批的操作计划。
-     *
-     * @param conversationId 会话 ID
-     * @return 审批的计划对象，不存在则返回 null
-     */
+    @Override
     @SuppressWarnings("unchecked")
     public List<Map<String, Object>> getApprovedPlan(String conversationId) {
         ConversationState state = load(conversationId);
         return (List<Map<String, Object>>) state.approvedPlan;
     }
 
-    /**
-     * 设置指定会话已审批的操作计划。
-     *
-     * @param conversationId 会话 ID
-     * @param plan           审批的计划对象
-     */
+    @Override
     public void setApprovedPlan(String conversationId, List<Map<String, Object>> plan) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);
@@ -281,37 +243,28 @@ public class ConversationStore implements IConversationStore {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    public List<Map<String, Object>> getSelectedToolSchemas(String conversationId) {
+    @Override
+    public List<ToolSpecification> getSelectedToolSpecifications(String conversationId) {
         ConversationState state = load(conversationId);
-        return (List<Map<String, Object>>) state.selectedToolSchemas;
+        return state.getSelectedToolSpecs(objectMapper);
     }
 
-    public void setSelectedToolSchemas(String conversationId, List<Map<String, Object>> schemas) {
+    @Override
+    public void setSelectedToolSpecifications(String conversationId, List<ToolSpecification> schemas) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);
-            state.selectedToolSchemas = schemas;
+            state.setSelectedToolSpecs(schemas, objectMapper);
             save(conversationId, state);
         }
     }
 
-    /**
-     * 获取指定会话的追踪 ID。
-     *
-     * @param conversationId 会话 ID
-     * @return 追踪 ID，不存在则返回 null
-     */
+    @Override
     public String getTraceId(String conversationId) {
         ConversationState state = load(conversationId);
         return state.traceId;
     }
 
-    /**
-     * 设置指定会话的追踪 ID。
-     *
-     * @param conversationId 会话 ID
-     * @param traceId        追踪 ID
-     */
+    @Override
     public void setTraceId(String conversationId, String traceId) {
         synchronized (lockFor(conversationId)) {
             ConversationState state = load(conversationId);

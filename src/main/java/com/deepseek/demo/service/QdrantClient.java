@@ -2,6 +2,11 @@ package com.deepseek.demo.service;
 
 import com.deepseek.demo.util.StringUtils;
 import com.fasterxml.jackson.databind.JsonNode;
+import dev.langchain4j.data.embedding.Embedding;
+import dev.langchain4j.data.document.Metadata;
+import dev.langchain4j.data.segment.TextSegment;
+import dev.langchain4j.store.embedding.EmbeddingMatch;
+import dev.langchain4j.store.embedding.qdrant.QdrantEmbeddingStore;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,6 +24,7 @@ public class QdrantClient {
     private static final Logger log = LoggerFactory.getLogger(QdrantClient.class);
 
     private final RestTemplate restTemplate;
+    private final QdrantEmbeddingStore embeddingStore;
     private final String qdrantHost;
     private final int qdrantPort;
     private final String docCollection;
@@ -33,6 +39,13 @@ public class QdrantClient {
         this.qdrantHost = qdrantHost;
         this.qdrantPort = qdrantPort;
         this.docCollection = docCollection;
+        this.embeddingStore = QdrantEmbeddingStore.builder()
+                .host(qdrantHost)
+                .port(qdrantPort)
+                .collectionName(docCollection)
+                .build();
+        log.info("QdrantEmbeddingStore 已创建: host={}, port={}, collection={}",
+                qdrantHost, qdrantPort, docCollection);
     }
 
     @PostConstruct
@@ -96,54 +109,39 @@ public class QdrantClient {
         return null;
     }
 
-    // ── Vector params ──
-
-    public Map<String, Object> buildSearchBody(float[] vector, int limit, String vectorName) {
-        Map<String, Object> body = new HashMap<>();
-        body.put("vector", toSearchVectorParam(vector, vectorName));
-        body.put("limit", limit);
-        body.put("with_payload", true);
-        return body;
-    }
-
-    public Object toVectorParam(float[] vector, String vectorName) {
-        if (vectorName != null) {
-            return Collections.singletonMap(vectorName, toList(vector));
-        }
-        return toList(vector);
-    }
-
-    public Object toSearchVectorParam(float[] vector, String vectorName) {
-        if (vectorName == null) return toList(vector);
-        Map<String, Object> named = new HashMap<>();
-        named.put("name", vectorName);
-        named.put("vector", toList(vector));
-        return named;
-    }
-
-    public List<Double> toList(float[] arr) {
-        List<Double> list = new ArrayList<>(arr.length);
-        for (float v : arr) {
-            list.add((double) v);
-        }
-        return list;
-    }
-
-    // ── Search ──
+    // ── Search (QdrantEmbeddingStore) ──
 
     public List<Map<String, Object>> search(String collection, float[] vector, int limit, String vectorName) {
-        String url = qdrantUrl("/collections/" + collection + "/points/search");
+        Embedding queryEmbedding = Embedding.from(vector);
+        List<EmbeddingMatch<TextSegment>> matches =
+                embeddingStore.findRelevant(queryEmbedding, limit, 0.0);
 
-        Map<String, Object> body = buildSearchBody(vector, limit, vectorName);
-        HttpHeaders headers = new HttpHeaders();
-        headers.setContentType(MediaType.APPLICATION_JSON);
-        ResponseEntity<JsonNode> response = restTemplate.postForEntity(
-                url, new HttpEntity<>(body, headers), JsonNode.class);
+        List<Map<String, Object>> results = new ArrayList<>();
+        for (EmbeddingMatch<TextSegment> match : matches) {
+            Map<String, Object> item = new HashMap<>();
+            item.put("id", match.embeddingId());
+            item.put("score", match.score());
 
-        return parseSearchResults(response.getBody());
+            TextSegment segment = match.embedded();
+            if (segment != null) {
+                item.put("text", segment.text());
+                Metadata metadata = segment.metadata();
+                String filePath = metadata != null ? metadata.getString("file_path") : null;
+                if (filePath != null) item.put("file_path", filePath);
+                String fileName = metadata != null ? metadata.getString("file_name") : null;
+                if (fileName != null) item.put("file_name", fileName);
+                Integer chunkIdx = metadata != null ? metadata.getInteger("chunk_index") : null;
+                if (chunkIdx != null) item.put("chunk_index", chunkIdx);
+                Integer totalChunks = metadata != null ? metadata.getInteger("total_chunks") : null;
+                if (totalChunks != null) item.put("total_chunks", totalChunks);
+            }
+
+            results.add(item);
+        }
+        return results;
     }
 
-    // ── Upsert ──
+    // ── Upsert (HTTP — QdrantEmbeddingStore 不支持自定义 ID + payload) ──
 
     public void upsert(String id, float[] vector, String text, String fileId,
                        int chunkIndex, int totalChunks) {
@@ -175,7 +173,7 @@ public class QdrantClient {
                 StringUtils.truncate(id, 50), fileId, chunkIndex + 1, totalChunks);
     }
 
-    // ── Scroll ──
+    // ── Scroll (HTTP — QdrantEmbeddingStore 无对应操作) ──
 
     public String scrollAndAssemble(String collection, String filePath) {
         String url = qdrantUrl("/collections/" + collection + "/points/scroll");
@@ -281,49 +279,6 @@ public class QdrantClient {
 
     // ── Payload parsing ──
 
-    @SuppressWarnings("unchecked")
-    public List<Map<String, Object>> parseSearchResults(JsonNode responseBody) {
-        List<Map<String, Object>> results = new ArrayList<>();
-        JsonNode points = responseBody.path("result");
-        for (JsonNode point : points) {
-            Map<String, Object> item = new HashMap<>();
-            item.put("id", point.path("id").asText());
-            item.put("score", point.path("score").asDouble());
-
-            JsonNode payload = point.path("payload");
-            String text = extractPayloadField(payload, "text", "content");
-            if (text != null) item.put("text", text);
-            String filePath = extractPayloadField(payload, "file_path", "filePath", "relativePath");
-            if (filePath != null) item.put("file_path", filePath);
-            String fileName = extractPayloadField(payload, "file_name", "fileName");
-            if (fileName == null && filePath != null) {
-                int idx = filePath.lastIndexOf('/');
-                fileName = idx >= 0 ? filePath.substring(idx + 1) : filePath;
-            }
-            if (fileName != null) item.put("file_name", fileName);
-
-            Integer chunkIdx = null;
-            if (payload.has("chunk_index")) chunkIdx = payload.get("chunk_index").asInt();
-            else if (payload.has("chunkIndex")) chunkIdx = payload.get("chunkIndex").asInt();
-            if (chunkIdx != null) item.put("chunk_index", chunkIdx);
-
-            if (payload.has("title")) item.put("title", payload.get("title").asText());
-            if (payload.has("tags") && payload.get("tags").isArray()) {
-                List<String> tags = new ArrayList<>();
-                payload.get("tags").forEach(t -> tags.add(t.asText()));
-                item.put("tags", tags);
-            }
-            if (payload.has("relatedFiles") && payload.get("relatedFiles").isArray()) {
-                List<String> relatedFiles = new ArrayList<>();
-                payload.get("relatedFiles").forEach(f -> relatedFiles.add(f.asText()));
-                item.put("relatedFiles", relatedFiles);
-            }
-
-            results.add(item);
-        }
-        return results;
-    }
-
     public String extractPayloadField(JsonNode payload, String... keys) {
         for (String key : keys) {
             if (payload.has(key)) {
@@ -331,6 +286,31 @@ public class QdrantClient {
             }
         }
         return null;
+    }
+
+    // ── Vector params ──
+
+    public Object toVectorParam(float[] vector, String vectorName) {
+        if (vectorName != null) {
+            return Collections.singletonMap(vectorName, toList(vector));
+        }
+        return toList(vector);
+    }
+
+    public Object toSearchVectorParam(float[] vector, String vectorName) {
+        if (vectorName == null) return toList(vector);
+        Map<String, Object> named = new HashMap<>();
+        named.put("name", vectorName);
+        named.put("vector", toList(vector));
+        return named;
+    }
+
+    public List<Double> toList(float[] arr) {
+        List<Double> list = new ArrayList<>(arr.length);
+        for (float v : arr) {
+            list.add((double) v);
+        }
+        return list;
     }
 
     // ── Getters ──

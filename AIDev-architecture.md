@@ -149,8 +149,9 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   ├── EmbeddingClient.java           # Embedding③ + 缓存（从 VectorService 提取）
 │   │   ├── MeiliSearchService.java        # Meilisearch⑧ 全文搜索
 │   │   ├── FileParser.java                # docx/xlsx 文件解析
-│   │   ├── AgentService.java              # Agent㉒ 编排 + 确认回调（733→260行）
-│   │   ├── ReActEngine.java               # ReAct㉓ 循环核心（从 AgentService 提取）
+│   │   ├── AgentService.java              # Agent㉒ 编排 + 确认回调（plan状态生命周期管理）
+│   │   ├── ReActEngine.java               # ReAct㉓ 循环核心 + autoMatchTool + 确认点创建
+│   │   ├── LlmContext.java                # ThreadLocal 传递 LLM 请求上下文（conversationId）
 │   │   ├── AgentFallback.java             # 兜底回复生成（无工具匹配/异常时）
 │   │   ├── DomainRouter.java              # Layer1: 意图→领域分类
 │   │   ├── ToolRegistry.java              # 工具注册中心（注解扫描/反射执行）
@@ -164,7 +165,7 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   └── tools/
 │   │       ├── TaskTools.java             # 任务管理工具集
 │   │       ├── ExternalTools.java         # 外部服务工具集
-│   │       ├── FinanceTools.java          # 金融计算工具集
+│   │       ├── FinanceTools.java          # 金融计算工具集（buyStock/sellStock 使用 Integer 参数避免 JSON 类型不匹配）
 │   │       └── MultiAgentTools.java       # 多 Agent 委派工具集
 │   ├── store/                             # 持久化层（Redis + 本地缓存降级）
 │   │   ├── IConversationStore.java        # 会话存储接口
@@ -218,8 +219,9 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 | MeiliSearchService | Meilisearch⑧ BM25⑨ 全文检索 | 7700 | Meilisearch HTTP API |
 | FileParser | docx/xlsx 文件文本提取 | — | Apache POI |
 | ingest.py | 文件分块⑪、embedding③、双路写入 | — | Ollama⑫ Python SDK |
-| AgentService | ReAct㉓ 编排 + 确认回调㉕（仅协作调度，733→260行） | — | DeepSeek API㉔ |
-| ReActEngine | ReAct㉓ 循环核心（从 AgentService 提取）：agentLoop + autoMatchTool + 确认点创建 | — | DeepSeek API |
+| LlmContext | ThreadLocal 上下文（conversationId 透传到 LLM 调用链路） | — | ThreadLocal |
+| AgentService | ReAct㉓ 编排 + 确认回调㉕ + plan 状态生命周期管理 | — | DeepSeek API㉔ |
+| ReActEngine | ReAct㉓ 循环核心：agentLoop + autoMatchTool（末位消息匹配）+ 确认点创建 | — | DeepSeek API |
 | ToolRegistry | @Tool 注解扫描、JSON Schema 生成、反射调用，实现 IToolRegistry | — | Spring Bean |
 | DomainRouter | Layer1: 意图→领域分类，轻量 LLM 调用 | — | DeepSeek API |
 | ToolRetriever | Layer2: 领域内语义+频率工具召回 | — | EmbeddingClient + ToolVectorStore |
@@ -335,8 +337,10 @@ ragChat(question, limit)
 
 核心循环：三层路由引擎前置过滤工具，LLM 交替进行推理和工具调用㉔，直至生成最终回答或达到最大轮次。
 
+#### 3.8.1 Chat 入口流程
+
 ```
-agentChat(conversationId, userMessage)
+AgentService.chat(conversationId, userMessage)
    │
    ▼
 ┌─ Layer 1: 领域路由 ──────────────────┐
@@ -356,49 +360,91 @@ agentChat(conversationId, userMessage)
 ① RAG 检索知识库 → 拼入 system prompt
    │
    ▼
-② 初始化 messages list
-   [system(含知识库), user(用户提问)]
+② 获取/初始化 messages list
+   │
+   ├─ 首次消息: [system(含知识库)]
+   │   planConfirmed=false, approvedPlan=null
+   │
+   └─ 后续消息: [+ 历史对话]
+       planConfirmed 保持不变（首次确认后=true）
+       approvedPlan=null（清除旧计划）
    │
    ▼
-③ ReAct㉓ 循环 (max 10 轮)
+③ 追加 UserMessage → ReAct㉓ 循环
+```
+
+#### 3.8.2 ReAct㉓ 循环（agentLoop）
+
+```
+ReAct 循环 (max 10 轮)
    │
    ├─ 调用 LLM（带 ToolSpecification 列表）
    │
-   ├─ 无 toolExecutionRequests → 返回最终回答 ✅
+   ├─ 无 toolExecutionRequests
+   │    │
+   │    ├─ 自动匹配（autoMatchTool，仅第 1 轮）
+   │    │    └─ 匹配成功:
+   │    │         ├─ 工具刚执行过? → 跳过，返回 LLM 文本
+   │    │         ├─ planConfirmed? → 执行（READ/WRITE 共同决定）
+   │    │         └─ !planConfirmed → 生成计划确认点
+   │    │
+   │    └─ 匹配失败 → 返回最终回答 ✅
    │
    └─ 有 toolExecutionRequests
          │
-         ├─ planConfirmed = false → 生成操作计划确认点㉕
-         │    存 checkpoint 后 return，等用户确认
+         ├─ planConfirmed = false
+         │   → 生成操作计划确认点㉕（READ+WRITE 均需确认）
+         │     存 checkpoint 后 return，等用户确认
          │
          └─ planConfirmed = true → 逐个执行
               │
-              ┌─ Layer 3: CapabilityGuard.validate()
-              │  用户消息 vs 工具能力关键词 → 拒绝则返回 LLM
+              ├─ approvedPlan != null → 过滤不在计划内的工具
+              │  （首次确认后有效，后续消息已清空）
               │
-              ├─ 校验通过 → FrequencyTracker 记录调用
-              │   ├─ READ           → 直接执行
-              │   ├─ WRITE + 白名单  → 直接执行
-              │   └─ WRITE + 非白名单 → 生成二次确认点㉕
+              ├─ Layer 3: CapabilityGuard.validate()
+              │  用户消息 vs 工具能力关键词 → 拒绝则回送 LLM
               │
-              ▼
-           执行结果追加 ToolExecutionResultMessage
-           → 继续循环（③）
+              ├─ FrequencyTracker 记录调用
+              │
+              ├─ READ 工具 → 直接执行
+              │
+              └─ WRITE 工具
+                   ├─ 白名单 → 直接执行
+                   └─ 非白名单 → 生成二次确认点㉕
+                             等用户确认后 handleExecConfirm 执行
 ```
 
-**双重确认机制㉕**：
-- **确认点 #1（操作计划确认）**：LLM 返回 ToolExecutionRequest 且 planConfirmed=false 时触发，用户确认后开始逐项执行
+**双重确认机制㉕**（按对话生命周期不同行为）：
+
+| 阶段 | READ 工具 | WRITE 工具 |
+|------|-----------|-----------|
+| 首次消息（plan 未确认） | 需要 plan 确认 | 需要 plan 确认 |
+| 首次消息（plan 已确认） | 直接执行 | 需要 exec 二次确认 |
+| 后续消息 | 直接执行 | 需要 exec 二次确认 |
+
+- **确认点 #1（操作计划确认）**：LLM 返回 ToolExecutionRequest 且 `planConfirmed=false` 时触发，用户确认后开始逐项执行
 - **确认点 #2（写操作二次确认）**：非白名单 WRITE 操作逐项确认，防止误写
-- 确认点存储于 Redis㉑，TTL 5 分钟，降级时切 LocalCache
+- plan 状态跨消息管理：首次确认后 `planConfirmed=true` 持久化，下条新消息自动继承
+- **状态清理**：新消息追加时清除旧 `approvedPlan`，但保留 `planConfirmed=true`
 
-**类型现代化（Phase 3）**：
+#### 3.8.3 autoMatchTool — 自动工具匹配
 
-- 全部使用 **LangChain4j 0.33.x 原生类型**：`ChatMessage`（`SystemMessage` / `UserMessage` / `AiMessage` / `ToolExecutionResultMessage`）、`Response<AiMessage>`、`ToolExecutionRequest`、`ToolSpecification`
-- 已删除旧版自建 DTO：`DeepSeekChatRequest`、`DeepSeekChatResponse`、`Message`、`ToolCall`、`FunctionCall`、`DeepSeekResponseNormalizer`
-- `ConversationStore` 消息通过 `ChatMessageJsonUtil` 序列化（标准 OpenAI 消息格式，Jackson 手动 toMap/fromMap）
-- `ConfirmationStore` pending requests 通过 `List<Map<String,String>>` 序列化（`ToolExecutionRequest` 为 LC4j 不可变类，不可直接 Jackson 序列化）
+当 LLM 未调用工具且本应为某个工具触发时，autoMatchTool 作为兜底机制：
 
-### 3.8.1 SubAgent — 子 Agent 执行器
+```
+autoMatchTool(messages, toolSchemas)
+   │
+   ├─ 从后向前查找最后一个 UserMessage（非首个）
+   ├─ 遍历关键词规则表匹配
+   │    例: "买入" → buy_stock, "净值" → query_stock_nav
+   └─ 返回匹配到的 ToolExecutionRequest
+```
+
+**保护措施**：
+- 匹配前检查该工具结果是否已在对话中（`ToolExecutionResultMessage`）→ 跳过，直接返回 LLM 文本
+- 仅在第 1 轮迭代 (`i == 0`) 触发，避免循环自动匹配
+
+#### 3.8.4 SubAgent — 子 Agent 执行器
 
 被 `MultiAgentTools.delegateTask` 调用，在主 Agent 的 ReAct 循环内独立执行子任务：
 
@@ -413,9 +459,17 @@ agentChat(conversationId, userMessage)
 
 特点：无 Redis 持久化、无确认流程、工具域隔离——子 Agent 只管执行并返回，结果由主 Agent 汇总统筹。
 
-### 3.8.2 AgentFallback — 兜底回复
+#### 3.8.5 AgentFallback — 兜底回复
 
 当 Agent 链路异常时（无匹配工具、工具调用失败、LLM 异常、满 10 轮），生成用户友好的中文兜底消息，避免将技术异常暴露给用户。
+
+**类型现代化（Phase 3）**：
+
+- 全部使用 **LangChain4j 0.33.x 原生类型**：`ChatMessage`（`SystemMessage` / `UserMessage` / `AiMessage` / `ToolExecutionResultMessage`）、`Response<AiMessage>`、`ToolExecutionRequest`、`ToolSpecification`
+- 已删除旧版自建 DTO：`DeepSeekChatRequest`、`DeepSeekChatResponse`、`Message`、`ToolCall`、`FunctionCall`、`DeepSeekResponseNormalizer`
+- `ConversationStore` 消息通过 `ChatMessageJsonUtil` 序列化（标准 OpenAI 消息格式，Jackson 手动 toMap/fromMap）
+- `ConfirmationStore` pending requests 通过 `List<Map<String,String>>` 序列化（`ToolExecutionRequest` 为 LC4j 不可变类，不可直接 Jackson 序列化）
+- `LlmContext` 通过 ThreadLocal 在 LLM 调用链路中传递当前 conversationId，替代方法参数传递
 
 ### 3.9 ToolRegistry — 工具注册中心
 
@@ -524,8 +578,8 @@ RestTemplate 使用 Apache HttpClient 连接池，避免每次请求创建新连
 | POST | `/api/chat/knowledge/search` | 纯检索（不经 LLM②） |
 | POST | `/api/knowledge/ingest/doc` | 文档摄入 |
 | POST | `/api/knowledge/sync/meilisearch` | Qdrant⑤ → Meilisearch⑧ 全量同步 |
-| POST | `/api/agent/chat` | Agent㉒ 对话入口（非流式） |
-| POST | `/api/agent/confirm` | Agent 确认回调㉕（确认/拒绝/反馈） |
+| POST | `/api/agent/chat` | Agent㉒ 对话入口（非流式），传入 `conversation_id` 继续已有会话 |
+| POST | `/api/agent/confirm` | Agent 确认回调㉕（确认/拒绝/反馈），支持 `conversation_id` + `confirmation_id` + `confirm` + `feedback` |
 
 ---
 
@@ -642,6 +696,9 @@ store:
 | **能力校验** | **关键词规则引擎（CapabilityKeywords 中英文 11 组映射）** | **极低延迟（纯内存匹配），拒绝明显不匹配的调用，减少 LLM 幻觉执行** |
 | **LLM 调用框架** | **LangChain4j 0.33.x OpenAiChatModel** | **替代 RestTemplate + 自定义 DTO，原生支持 tool calling、streaming、多态消息类型，减少自建代码和维护成本** |
 | DeepSeek V4 `reasoning_content` 轮播 | LangChain4j OpenAiChatModel 内部透传非标准字段 | V4 thinking mode 强制要求回传此字段，否则 HTTP 400 |
+| **Plan 生命周期** | **planConfirmed 持久化跨消息，approvedPlan 每新消息清空** | **首次确认后后续 READ 免确认；旧计划不污染新请求，WRITE 仍走 exec 确认** |
+| **autoMatchTool 末位策略** | **从后向前查找最后一个 UserMessage + 跳过已执行工具** | **避免匹配历史旧消息导致误触发；工具执行完毕后直接返回 LLM 文本** |
+| **工具参数类型匹配** | **@ToolParam number 对应 Java Integer，而非 String** | **LLM 返回 JSON number 类型，反射调用时 Integer 自动匹配，避免 argument type mismatch** |
 | 降级策略 | 组件异常时静默降级 | 不阻塞主流程 |
 
 ---

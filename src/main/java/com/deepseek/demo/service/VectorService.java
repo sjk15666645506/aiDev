@@ -88,6 +88,11 @@ public class VectorService implements IVectorSearchService {
 
             List<Map<String, Object>> merged = rrfMerge(qdrantResults, meiliResults, limit);
 
+            if (!keywords.isEmpty()) {
+                merged.removeIf(r -> computeKeywordScore(
+                        (String) r.getOrDefault("text", ""), keywords) == 0);
+            }
+
             long elapsed = System.currentTimeMillis() - start;
             log.info("混合检索完成: Qdrant={}条, Meilisearch={}条, 合并后={}条, 耗时={}ms",
                     qdrantResults.size(), meiliResults.size(), merged.size(), elapsed);

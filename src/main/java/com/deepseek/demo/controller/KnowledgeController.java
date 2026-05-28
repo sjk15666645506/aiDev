@@ -136,69 +136,76 @@ public class KnowledgeController {
      * @return 同步结果 */
     @PostMapping("/sync/meilisearch")
     public Map<String, Object> syncToMeilisearch(@RequestBody Map<String, String> request) {
-        /** 来源 Qdrant collection 名称，默认 aiknowledge-doc */
         String collection = request.getOrDefault("collection", "aiknowledge-doc");
-        /** 目标 Meilisearch 索引名称，默认同 collection */
         String meiliIndex = request.getOrDefault("meiliIndex", collection);
-        /** 单次 scroll 条数，默认 1000 */
-        int limit = Integer.parseInt(request.getOrDefault("limit", "1000"));
+        int pageSize = Integer.parseInt(request.getOrDefault("limit", "1000"));
 
         log.info("开始同步 Qdrant[{}] → Meilisearch[{}]", collection, meiliIndex);
 
         try {
-            // scroll Qdrant 全部数据
+            // 清空 Meilisearch 索引，避免残留已删除文档
+            String meiliClearUrl = "http://localhost:7700/indexes/" + meiliIndex + "/documents";
+            new RestTemplate().exchange(meiliClearUrl, HttpMethod.DELETE, null, JsonNode.class);
+            log.info("已清空 Meilisearch[{}] 现有数据", meiliIndex);
+
             String scrollUrl = "http://localhost:" + vectorService.getQdrantPort()
                     + "/collections/" + collection + "/points/scroll";
 
-            Map<String, Object> scrollBody = new HashMap<>();
-            scrollBody.put("limit", limit);
-            scrollBody.put("with_payload", true);
-            scrollBody.put("with_vectors", false);
-
             HttpHeaders headers = new HttpHeaders();
             headers.setContentType(MediaType.APPLICATION_JSON);
-            HttpEntity<Map<String, Object>> entity = new HttpEntity<>(scrollBody, headers);
+            RestTemplate scrollClient = new RestTemplate();
 
-            ResponseEntity<JsonNode> response = new RestTemplate()
-                    .postForEntity(scrollUrl, entity, JsonNode.class);
-            JsonNode points = response.getBody().path("result").path("points");
+            int totalSynced = 0;
+            JsonNode nextOffset = null;
 
-            // 转换成 Meilisearch 文档
-            List<Map<String, Object>> docs = new ArrayList<>();
-            for (JsonNode pt : points) {
-                JsonNode pl = pt.path("payload");
-                Map<String, Object> doc = new HashMap<>();
-                doc.put("id", pt.path("id").asText());
-                doc.put("text", pl.has("text") ? pl.get("text").asText()
-                        : pl.has("content") ? pl.get("content").asText() : "");
-                doc.put("file_path", pl.has("file_path") ? pl.get("file_path").asText()
-                        : pl.has("filePath") ? pl.get("filePath").asText() : "");
-                doc.put("file_name", pl.has("file_name") ? pl.get("file_name").asText()
-                        : pl.has("fileName") ? pl.get("fileName").asText() : "");
-                doc.put("chunk_index", pl.has("chunk_index") ? pl.get("chunk_index").asInt()
-                        : pl.has("chunkIndex") ? pl.get("chunkIndex").asInt() : 0);
-                doc.put("file_type", pl.path("file_type").asText(""));
-                doc.put("file_hash", pl.path("file_hash").asText(""));
-                docs.add(doc);
-            }
+            do {
+                Map<String, Object> scrollBody = new HashMap<>();
+                scrollBody.put("limit", pageSize);
+                scrollBody.put("with_payload", true);
+                scrollBody.put("with_vectors", false);
+                if (nextOffset != null) {
+                    scrollBody.put("offset", nextOffset);
+                }
 
-            if (docs.isEmpty()) {
-                Map<String, Object> result = new HashMap<>();
-                result.put("sync", collection);
-                result.put("documents", 0);
-                result.put("message", "没有数据需要同步");
-                return result;
-            }
+                HttpEntity<Map<String, Object>> entity = new HttpEntity<>(scrollBody, headers);
+                ResponseEntity<JsonNode> response = scrollClient.postForEntity(scrollUrl, entity, JsonNode.class);
+                JsonNode result = response.getBody().path("result");
+                JsonNode points = result.path("points");
 
-            // 写入 Meilisearch
-            String meiliUrl = "http://localhost:7700/indexes/" + meiliIndex + "/documents";
-            HttpEntity<List<Map<String, Object>>> meiliEntity = new HttpEntity<>(docs, headers);
-            new RestTemplate().postForEntity(meiliUrl, meiliEntity, JsonNode.class);
+                if (!points.isArray() || points.size() == 0) break;
 
-            log.info("同步完成: {} 条文档写入 Meilisearch[{}]", docs.size(), meiliIndex);
+                List<Map<String, Object>> docs = new ArrayList<>();
+                for (JsonNode pt : points) {
+                    JsonNode pl = pt.path("payload");
+                    Map<String, Object> doc = new HashMap<>();
+                    doc.put("id", pt.path("id").asText());
+                    doc.put("text", pl.has("text") ? pl.get("text").asText()
+                            : pl.has("content") ? pl.get("content").asText() : "");
+                    doc.put("file_path", pl.has("file_path") ? pl.get("file_path").asText()
+                            : pl.has("filePath") ? pl.get("filePath").asText() : "");
+                    doc.put("file_name", pl.has("file_name") ? pl.get("file_name").asText()
+                            : pl.has("fileName") ? pl.get("fileName").asText() : "");
+                    doc.put("chunk_index", pl.has("chunk_index") ? pl.get("chunk_index").asInt()
+                            : pl.has("chunkIndex") ? pl.get("chunkIndex").asInt() : 0);
+                    doc.put("file_type", pl.path("file_type").asText(""));
+                    doc.put("file_hash", pl.path("file_hash").asText(""));
+                    docs.add(doc);
+                }
+
+                String meiliUrl = "http://localhost:7700/indexes/" + meiliIndex + "/documents";
+                HttpEntity<List<Map<String, Object>>> meiliEntity = new HttpEntity<>(docs, headers);
+                scrollClient.postForEntity(meiliUrl, meiliEntity, JsonNode.class);
+
+                totalSynced += docs.size();
+                log.info("同步进度: {} 条写入 Meilisearch[{}]", totalSynced, meiliIndex);
+
+                nextOffset = result.path("next_page_offset");
+            } while (nextOffset != null && !nextOffset.isNull());
+
+            log.info("同步完成: 共 {} 条文档写入 Meilisearch[{}]", totalSynced, meiliIndex);
             Map<String, Object> result = new HashMap<>();
             result.put("sync", collection);
-            result.put("documents", docs.size());
+            result.put("documents", totalSynced);
             result.put("meiliIndex", meiliIndex);
             return result;
         } catch (Exception e) {

@@ -217,7 +217,7 @@ public class ToolRegistry implements IToolRegistry, ApplicationContextAware, App
      * @return ToolSpecification 列表
      */
     public List<ToolSpecification> toToolSpecifications(List<ToolMeta> toolMetas) {
-        if (toolMetas == null || toolMetas.isEmpty()) return Collections.emptyList();
+        if (toolMetas == null || toolMetas.isEmpty()) return new ArrayList<>();
         List<ToolSpecification> specs = new ArrayList<>(toolMetas.size());
         for (ToolMeta meta : toolMetas) {
             specs.add(toToolSpecification(meta));

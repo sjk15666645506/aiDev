@@ -1,35 +1,59 @@
-# aiDev
+# AIDev
 
-AI 学习项目 —— 基于 DeepSeek + RAG 的知识库问答系统。
+AI 学习项目。Java 后端 REST API + Agent 引擎 + Vue 3 前端。
 
-> 本项目基于 macOS 开发与运行。
+## 功能
+
+- **💬 聊天** — 直接对话 DeepSeek V4 Flash
+- **📚 知识库 RAG** — 文档摄入 → 向量+全文检索 → LLM 问答
+- **🤖 Agent** — ReAct 循环 + Tool Calling + 双重确认
+- **📈 个股交易分析** — 实时行情 + 技术指标 + 大盘背景 + LLM 分析报告
+- **📊 大盘分析** — 全市场数据（指数/涨跌统计/板块排行/TOP 榜单）→ LLM 盘面研判
+- **🔍 股票搜索** — 输入代码或名称，模糊匹配 A 股 5400+ 只 + 常用美股
+
+## 快速开始
+
+### 1. 后端
+
+```bash
+export DEEPSEEK_API_KEY=sk-xxxxx
+
+# 启动依赖服务
+brew services start redis
+brew services start meilisearch
+docker run -d --name qdrant -p 16333:6333 qdrant/qdrant
+ollama pull nomic-embed-text
+
+# 启动 Spring Boot
+mvn spring-boot:run
+```
+
+### 2. 前端
+
+```bash
+cd aiDev-vue
+npm install
+npm run dev
+# 访问 http://localhost:5173
+```
+
+### 3. 数据采集（可选，用于大盘分析）
+
+```bash
+cd ingestion-pipeline
+python3 batch_collect.py    # 每日 15:30 定时执行
+```
 
 ## 项目结构
 
 ```
 ├── src/main/java/com/deepseek/demo/    ← Java 后端主代码
-├── ingestion-pipeline/                  ← Python 文档向量化脚本
-│   ├── ingest.py                        （将文档导入 Qdrant）
-│   └── requirements.txt
-├── scripts/                             ← 辅助脚本
-│   ├── pywc.py
-│   └── test_pywc.py
+├── ingestion-pipeline/                  ← Python 数据采集脚本
+├── aiDev-vue/                           ← Vue 3 前端
 └── pom.xml
 ```
 
-## 注意事项
-
-### 1. API Key 配置
-
-`src/main/resources/application.yml` 中 `deepseek.api-key` 使用 `${DEEPSEEK_API_KEY}` 占位符，**不要直接写入真实 key**。
-
-通过环境变量或 IDE Run Configuration 传入：
-
-```bash
-export DEEPSEEK_API_KEY=sk-xxxxx
-```
-
-### 2. 依赖的服务
+## 依赖服务
 
 | 服务 | 用途 | 默认地址 |
 |------|------|---------|
@@ -37,20 +61,12 @@ export DEEPSEEK_API_KEY=sk-xxxxx
 | Qdrant | 向量数据库 | localhost:16333 |
 | Ollama | 本地 embedding 模型 | localhost:11434 |
 | Meilisearch | 全文检索引擎 | localhost:7700 |
+| Redis | 会话/确认点存储 | localhost:6379 |
 
-启动项目前确保以上服务可用。
+## API Key 配置
 
-### 3. 文档向量化（ingestion-pipeline）
-
-Python 脚本，需要先安装依赖：
+`application.yml` 中 `deepseek.api-key` 使用 `${DEEPSEEK_API_KEY}` 占位符，通过环境变量传入：
 
 ```bash
-cd ingestion-pipeline
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
+export DEEPSEEK_API_KEY=sk-xxxxx
 ```
-
-### 4. Python 脚本
-
-`scripts/` 和 `ingestion-pipeline/` 下的 `.venv/`、`__pycache__/` 已加入 `.gitignore`，不会提交到仓库。

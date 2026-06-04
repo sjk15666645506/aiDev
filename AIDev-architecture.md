@@ -1,8 +1,9 @@
 # AIDev 项目架构文档
 
-> 个人 RAG 系统，用于学习笔记管理与 AI 问答。
-> Java 后端提供 REST API，Python 脚本负责文档摄入。
-> 基于 macOS 开发与运行。
+> RAG 系统 + 交易分析 Agent + 大盘分析。
+> Java 后端提供 REST API + Agent 引擎，Python 脚本负责文档摄入 + 金融数据采集。
+> LLM 统一使用 **DeepSeek V4 Flash**（云端 API），无本地模型。
+> 基于 macOS (M5) 开发与运行。
 
 ---
 
@@ -11,7 +12,7 @@
 | # | 术语 | 中文 / 说明 |
 |---|------|-------------|
 | ① | **RAG** | Retrieval-Augmented Generation，检索增强生成。先检索相关知识，再让 LLM 基于检索结果回答问题，减少幻觉 |
-| ② | **LLM** | Large Language Model，大语言模型（如 DeepSeek、GPT）。理解并生成自然语言 |
+| ② | **LLM** | Large Language Model，大语言模型（DeepSeek V4 Flash）。理解并生成自然语言 |
 | ③ | **Embedding** | 向量化。将文本映射为高维空间中的数值向量，语义相近的文本向量距离更近 |
 | ④ | **Vector** | 向量。Embedding 输出的数值数组，本系统使用 768 维向量 |
 | ⑤ | **Qdrant** | 向量数据库。专门存储和检索向量数据的服务，支持余弦相似度搜索 |
@@ -21,7 +22,7 @@
 | ⑨ | **BM25** | 全文检索排序算法。根据关键词在文档中出现的频率和稀有度计算相关性得分 |
 | ⑩ | **RRF** | Reciprocal Rank Fusion，倒数排序融合。合并多路检索结果的排序算法，公式 `1/(k+rank)` |
 | ⑪ | **Chunk** | 分片/块。将长文档切分成多个小片段分别索引，便于精确检索 |
-| ⑫ | **Ollama** | 本地运行 LLM 和 Embedding 模型的工具，无需网络 API |
+| ⑫ | **Ollama** | 本地运行 Embedding 模型的工具，仅用于 nomic-embed-text |
 | ⑬ | **nomic-embed-text** | Ollama 上的开源文本 Embedding 模型，输出 768 维向量 |
 | ⑭ | **Token** | 词元。LLM 处理文本的最小单位，中文约 1 字 ≈ 1-2 tokens，英文约 1 词 ≈ 1-2 tokens |
 | ⑮ | **Context Window** | 上下文窗口。LLM 能接收的最大 token 数，DeepSeek 为 1M（约 100 万 tokens） |
@@ -35,77 +36,94 @@
 | ㉓ | **ReAct** | Reasoning + Acting 循环。LLM 交替进行推理决策和工具调用，每一步基于上一步结果继续 |
 | ㉔ | **Tool Calling** | LLM 调用预定义 API 的机制。DeepSeek 原生支持 function calling，返回 tool_calls |
 | ㉕ | **Confirmation** | 确认机制。操作计划确认 + 写操作二次确认，HITL（Human-in-the-Loop）保障安全 |
+| ㉖ | **Sina Finance API** | 新浪财经行情接口。批量查询 A 股 800 只/次，无限制，数据源稳定 |
+| ㉗ | **East Money API** | 东方财富行情/基本面接口。F10 公司概况接口（并发 50 线程），用于批量获取行业映射 |
+| ㉘ | **Market Data** | 全量 A 股日频数据。每日采集 ~5400 只股票 OHLC + 大盘指数 + 涨跌统计 + 行业板块 |
 
 ---
 
 ## 一、系统总览
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                    用户 / 客户端                              │
-│              (HTTP / cURL / 前端)                            │
-└──────────────────┬──────────────────────────────────────────┘
-                   │
-                   ▼
-┌───────────────────────────────────────────────────────────────┐
-│              Java Spring Boot Backend (port 8081)              │
-│                                                                │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────────┐   │
-│  │ DeepSeekCtrl  │  │ KnowledgeCtrl│  │  AppConfig         │   │
-│  │ /api/chat/**  │  │ /api/knowledge│  │  (RestTemplate) ⑰│   │
-│  └───┬───┬───────┘  └──────┬───────┘  └────────────────────┘   │
-│      │   │                 │                                    │
-│      ▼   ▼                 ▼                                    │
-│  ┌─────────────┐  ┌──────────────────┐                         │
-│  │ LangChain4j │  │  AgentSvc ㉒      │                         │
-│  │ LlmSvc       │  │  (ReAct 循环㉓)   │                         │
-│  │ (LLM②调用)   │  │                   │                         │
-│  └─────────────┘  └────────┬─────────┘                         │
-│                            │                                    │
-│  ┌──────────────────────────────────────────────────────┐       │
-│  │               Agent 模块组件                          │       │
-│  │  ┌──────────────┐  ┌──────────────────┐              │       │
-│  │  │ ToolRegistry │  │ ConversationStore│              │       │
-│  │  │ (@Tool扫描)   │  │ (Redis㉑ 会话存储) │              │       │
-│  │  └──────────────┘  └──────────────────┘              │       │
-│  │  ┌──────────────┐  ┌──────────────────┐              │       │
-│  │  │ Confirmation │  │  Example Tools    │              │       │
-│  │  │ Store(Redis) │  │  (Task/External) │              │       │
-│  │  └──────────────┘  └──────────────────┘              │       │
-│  └──────────────────────────────────────────────────────┘       │
-│                                                                  │
-│  ┌─────────────┐  ┌──────────────────┐                         │
-│  │GeneralRagSvc①│  │  (RAG编排)        │                         │
-│  └────────┬─────┘  └──────────────────┘                         │
-│           │                                                     │
-│  ┌────────┼────────┐                                            │
-│  ▼        ▼        ▼                                            │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐          │
-│  │ VectorService│  │MeiliSearchSvc│  │  FileParser   │          │
-│  │ (Qdrant⑤向量) │  │(BM25⑨全文)   │  │(docx/xlsx)   │          │
-│  └──────┬───────┘  └──────┬───────┘  └──────────────┘          │
-└─────────┼──────────────────┼────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                          用户 / 客户端                                 │
+│                    (HTTP / cURL / Vue 前端)                          │
+└────────────────────┬───────────────────────────────────────────────┘
+                     │
+                     ▼
+┌────────────────────────────────────────────────────────────────────────┐
+│                  Java Spring Boot Backend (port 8081)                  │
+│                                                                        │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
+│  │ DeepSeekCtrl  │  │KnowledgeCtrl │  │ TradingCtrl  │  │ AgentCtrl  │ │
+│  │ /api/chat/**  │  │/api/knowledge│  │ /api/trading │  │ /api/agent │ │
+│  └───┬───┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬─────┘ │
+│      │   │                 │                  │                │       │
+│      ▼   ▼                 ▼                  ▼                ▼       │
+│  ┌─────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
+│  │ LangChain4j │  │  AgentSvc ㉒      │  │  TradingAnalysisSvc      │  │
+│  │ LlmSvc      │  │  (ReAct 循环㉓)    │  │  (个股分析编排)           │  │
+│  │ (DS V4)     │  └────────┬─────────┘  ├──────────────────────────┤  │
+│  └─────────────┘           │              │  MarketAnalysisSvc       │  │
+│                            │              │  (大盘分析)              │  │
+│  ┌────────────────────────────────────┐  ├──────────────────────────┤  │
+│  │          Agent 模块组件             │  │  MarketDataSvc            │  │
+│  │  ┌──────────────┐  ┌────────────┐  │  │  (读取全市场数据)         │  │
+│  │  │ ToolRegistry │  │Conversation│  │  ├──────────────────────────┤  │
+│  │  │ (@Tool扫描)   │  │Store(Redis)│  │  │  StockDataSvc             │  │
+│  │  └──────────────┘  └────────────┘  │  │  (调 yfinance_data.py)    │  │
+│  │  ┌──────────────┐  ┌────────────┐  │  └──────────────────────────┘  │
+│  │  │ Confirmation │  │  Tools     │  │                               │
+│  │  │ Store(Redis) │  │(Task/Fin)  │  │                               │
+│  │  └──────────────┘  └────────────┘  │                               │
+│  └────────────────────────────────────┘                               │
+│                                                                        │
+│  ┌─────────────┐  ┌──────────────────┐                               │
+│  │GeneralRagSvc①│  │  (RAG编排)        │                               │
+│  └────────┬─────┘  └──────────────────┘                               │
+│           │                                                           │
+│  ┌────────┼────────┐                                                  │
+│  ▼        ▼        ▼                                                  │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐                │
+│  │ VectorService│  │MeiliSearchSvc│  │  FileParser   │                │
+│  │ (Qdrant⑤向量) │  │(BM25⑨全文)   │  │(docx/xlsx)   │                │
+│  └──────┬───────┘  └──────┬───────┘  └──────────────┘                │
+└─────────┼──────────────────┼──────────────────────────────────────────┘
           │                  │
           ▼                  ▼
 ┌─────────────────┐  ┌──────────────────────┐  ┌─────────────────┐
 │  Qdrant (16333) │  │ Meilisearch (7700) ⑧│  │  Redis (6379) ㉑│
-│  向量数据库⑤     │  │ 全文搜索引擎          │  │  会话/确认点存储  │
+│  向量数据库⑤     │  │  全文搜索引擎          │  │  会话/确认点存储  │
 │  collection⑥:   │  │ index: aiknowledge-doc│  │  TTL 自动过期   │
 │  aiknowledge-doc│  └──────────────────────┘  └─────────────────┘
 └────────┬────────┘
-         │
-         ▼
-┌─────────────────┐
-│  Ollama (11434) │
-│  nomic-embed-text⑬│
-│  (embedding③模型)│
-└─────────────────┘
+          │
+          ▼
+┌────────────────────────────────────┐
+│  Ollama (11434) ⑫                  │
+│  └── nomic-embed-text⑬ (embedding) │
+└────────────────────────────────────┘
 
-┌──────────────────────────────────────────┐
-│       Python Ingestion Pipeline          │
-│  ingest.py → 分块⑪ → embedding③ → 写入  │
-│            → Qdrant + Meilisearch       │
-└──────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────────┐
+│              Python 数据管线                                  │
+│                                                             │
+│  ingestion-pipeline/                                        │
+│  ├── ingest.py                文档摄入 → Qdrant + Meilisearch│
+│  ├── yfinance_data.py         金融数据获取（Sina㉖ + 东财㉗） │
+│  ├── batch_collect.py         ㉘ 全量 A 股日频采集           │
+│  └── market_data/             日频数据存储                   │
+│      ├── meta/                                              │
+│      │   ├── stocks_list.json    A 股清单 (~5400 只)        │
+│      │   ├── industry_map.json   行业映射 (并发 F10 获取)    │
+│      │   └── history_index.json  采集历史日期索引            │
+│      └── YYYYMMDD/               每日数据                    │
+│          ├── snapshot.json.gz     全市场快照（gzip ~200KB）  │
+│          ├── indices.json         大盘指数 (7个)             │
+│          ├── market_stats.json    涨跌统计                   │
+│          ├── sectors.json         行业板块 (109个板块)       │
+│          ├── top_stocks.json      TOP 榜单                  │
+│          └── training.json        汇总训练样本               │
+└────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -132,6 +150,7 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   ├── DeepSeekController.java        # 聊天 & 知识库 API
 │   │   ├── KnowledgeController.java       # 文档摄入 & 同步 API
 │   │   ├── AgentController.java           # Agent㉒ 对话 & 确认 API
+│   │   ├── TradingController.java         # 交易分析 API（/api/trading/**）
 │   │   └── GlobalExceptionHandler.java    # 全局异常处理（@RestControllerAdvice）
 │   ├── dto/
 │   │   ├── AgentResponse.java             # Agent 统一响应
@@ -140,19 +159,23 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   └── TraceFilter.java               # 全链路 traceId 注入（MDC + X-Trace-Id 响应头）
 │   ├── service/
 │   │   ├── ILlmService.java               # LLM 调用接口（LangChain4j 原生类型）
-│   │   ├── LangChain4jLlmService.java      # LLM 调用实现（OpenAiChatModel 适配 DeepSeek API）
+│   │   ├── LangChain4jLlmService.java      # 唯一 LLM 实现（OpenAiChatModel 适配 DeepSeek API）
 │   │   ├── IVectorSearchService.java       # 向量检索接口（VectorService 实现）
 │   │   ├── IToolRegistry.java              # 工具注册接口（ToolRegistry 实现）
+│   │   ├── StockDataService.java           # 股票数据服务（调 Python yfinance_data.py）
+│   │   ├── TradingAnalysisService.java     # 个股交易分析（数据→DS V4 Flash→分析报告）
+│   │   ├── MarketDataService.java          # 全市场数据读取（读 batch_collect 采集数据）
+│   │   ├── MarketAnalysisService.java      # 大盘分析（全市场数据→DS V4 Flash→盘面研判）
 │   │   ├── GeneralRagService.java         # 文档 RAG① 编排
-│   │   ├── VectorService.java             # 混合检索(RRF⑩) + 上下文扩展（844→260行）
-│   │   ├── QdrantClient.java              # Qdrant⑤ HTTP 通信（从 VectorService 提取）
-│   │   ├── EmbeddingClient.java           # Embedding③ + 缓存（从 VectorService 提取）
+│   │   ├── VectorService.java             # 混合检索(RRF⑩) + 上下文扩展
+│   │   ├── QdrantClient.java              # Qdrant⑤ HTTP 通信
+│   │   ├── EmbeddingClient.java           # Embedding③ + 缓存
 │   │   ├── MeiliSearchService.java        # Meilisearch⑧ 全文搜索
 │   │   ├── FileParser.java                # docx/xlsx 文件解析
-│   │   ├── AgentService.java              # Agent㉒ 编排 + 确认回调（plan状态生命周期管理）
+│   │   ├── AgentService.java              # Agent㉒ 编排 + 确认回调
 │   │   ├── ReActEngine.java               # ReAct㉓ 循环核心 + autoMatchTool + 确认点创建
-│   │   ├── LlmContext.java                # ThreadLocal 传递 LLM 请求上下文（conversationId）
-│   │   ├── AgentFallback.java             # 兜底回复生成（无工具匹配/异常时）
+│   │   ├── LlmContext.java                # ThreadLocal 传递 LLM 请求上下文
+│   │   ├── AgentFallback.java             # 兜底回复生成
 │   │   ├── DomainRouter.java              # Layer1: 意图→领域分类
 │   │   ├── ToolRegistry.java              # 工具注册中心（注解扫描/反射执行）
 │   │   ├── ToolMeta.java                  # 工具元数据模型
@@ -165,19 +188,19 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   └── tools/
 │   │       ├── TaskTools.java             # 任务管理工具集
 │   │       ├── ExternalTools.java         # 外部服务工具集
-│   │       ├── FinanceTools.java          # 金融计算工具集（buyStock/sellStock 使用 Integer 参数避免 JSON 类型不匹配）
+│   │       ├── FinanceTools.java          # 金融计算工具集
 │   │       └── MultiAgentTools.java       # 多 Agent 委派工具集
 │   ├── store/                             # 持久化层（Redis + 本地缓存降级）
 │   │   ├── IConversationStore.java        # 会话存储接口
-│   │   ├── ConversationStore.java         # 会话上下文存储（Redis, TTL 30min, 分conversationId锁）
+│   │   ├── ConversationStore.java         # 会话上下文存储（Redis, TTL 30min）
 │   │   ├── ConfirmationStore.java         # 确认点存储（Redis, TTL 5min）
 │   │   └── LocalCache.java                # 本地缓存（TTL + 容量上限逐出）
 │   └── util/
-│       └── ChatMessageJsonUtil.java        # ChatMessage ↔ JSON 序列化（标准 OpenAI 消息格式）
-│       └── StringUtils.java               # 公共字符串工具（truncate 等）
+│       ├── ChatMessageJsonUtil.java        # ChatMessage ↔ JSON 序列化
+│       └── StringUtils.java               # 公共字符串工具
 ├── src/main/resources/
-│   ├── application.yml                    # 本地配置（${DEEPSEEK_API_KEY}，不写真实 key）
-│   └── application.yml.example            # 配置模板，供新开发者参考
+│   ├── application.yml                    # 本地配置（${DEEPSEEK_API_KEY}）
+│   └── application.yml.example            # 配置模板
 ├── src/test/java/com/deepseek/demo/
 │   ├── controller/
 │   │   ├── DeepSeekControllerTest.java
@@ -190,12 +213,32 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   └── store/
 │       ├── ConversationStoreTest.java
 │       └── ConfirmationStoreTest.java
-├── ingestion-pipeline/                    # Python 摄入管线
+├── ingestion-pipeline/                    # Python 数据管线
 │   ├── ingest.py                          # 文档分块⑪ + embedding③ + 写入
-│   └── requirements.txt                   # Python 依赖
-└── scripts/                               # Python 辅助脚本
-    ├── pywc.py                            # 简化版 wc 工具
-    └── test_pywc.py                       # pywc 测试
+│   ├── yfinance_data.py                   # 金融数据获取（Sina㉖ + 东财㉗ + yfinance）
+│   ├── batch_collect.py                   # ㉘ 全量 A 股日频采集
+│   ├── market_data/                       # 日频全市场数据
+│   │   ├── meta/                          # 元数据（股票清单/行业映射/历史索引）
+│   │   └── YYYYMMDD/                      # 每日快照 (snapshot.json.gz + 统计)
+│   ├── requirements.txt                   # Python 依赖
+│   ├── pywc.py                            # 简化版 wc 工具
+│   └── test_pywc.py                       # pywc 测试
+└── aiDev-vue/                             # Vue 3 前端应用
+    ├── src/
+    │   ├── api/index.ts                   # API 封装（chat / trading / market / agent）
+    │   ├── pages/
+    │   │   ├── TradingPage.vue            # 个股交易分析页面
+    │   │   ├── MarketPage.vue             # 大盘分析页面
+    │   │   ├── ChatPage.vue               # 聊天页面
+    │   │   ├── AgentPage.vue              # Agent 对话页面
+    │   │   ├── KnowledgeQAPage.vue        # 知识库问答页面
+    │   │   ├── KnowledgeSearchPage.vue    # 知识库搜索页面
+    │   │   └── DocumentPage.vue           # 文档管理页面
+    │   ├── router/index.ts                # 路由配置
+    │   ├── layouts/MainLayout.vue         # 主导航布局
+    │   └── App.vue                        # Vue 根组件
+    ├── vite.config.ts                     # Vite 配置（代理 /api → localhost:8081）
+    └── package.json
 ```
 
 ---
@@ -209,45 +252,43 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 | DeepSeekController | 聊天、RAG①、知识库搜索的 HTTP 入口 | 8081 | Spring Boot |
 | KnowledgeController | 文档摄入、Meilisearch⑧ 同步管理 | 8081 | Spring Boot |
 | AgentController | Agent㉒ 对话 & 确认回调 HTTP 入口 | 8081 | Spring Boot |
+| TradingController | 个股分析、大盘分析、搜索、行情接口 | 8081 | Spring Boot |
 | GlobalExceptionHandler | 全局异常 → JSON（@RestControllerAdvice） | — | Spring Boot |
 | TraceFilter | 全链路 traceId 注入（MDC + X-Trace-Id 响应头） | — | OncePerRequestFilter |
-| LangChain4jLlmService | 调用 DeepSeek LLM② API（非流式 + 流式），基于 OpenAiChatModel 适配，实现 ILlmService | — | LangChain4j 0.33.x |
+| LangChain4jLlmService | DeepSeek V4 Flash 调用（非流式 + 流式 + Tool Calling） | — | LangChain4j 0.33.x |
 | GeneralRagService | RAG① 流程编排：检索 → 过滤 → 组装提示 → LLM② | — | — |
-| VectorService | 混合检索（RRF⑩ 合并）+ 上下文扩展，实现 IVectorSearchService | 16333 | Qdrant + Meilisearch |
-| QdrantClient | Qdrant⑤ HTTP 通信（collection/search/scroll/upsert） | 16333 | Qdrant REST API |
-| EmbeddingClient | Embedding③ + 5min 缓存（从 VectorService 提取） | 11434 | Ollama |
+| VectorService | 混合检索（RRF⑩ 合并）+ 上下文扩展 | 16333 | Qdrant + Meilisearch |
+| QdrantClient | Qdrant⑤ HTTP 通信 | 16333 | Qdrant REST API |
+| EmbeddingClient | Embedding③ + 5min 缓存 | 11434 | Ollama nomic-embed-text |
 | MeiliSearchService | Meilisearch⑧ BM25⑨ 全文检索 | 7700 | Meilisearch HTTP API |
 | FileParser | docx/xlsx 文件文本提取 | — | Apache POI |
 | ingest.py | 文件分块⑪、embedding③、双路写入 | — | Ollama⑫ Python SDK |
-| LlmContext | ThreadLocal 上下文（conversationId 透传到 LLM 调用链路） | — | ThreadLocal |
-| AgentService | ReAct㉓ 编排 + 确认回调㉕ + plan 状态生命周期管理 | — | DeepSeek API㉔ |
-| ReActEngine | ReAct㉓ 循环核心：agentLoop + autoMatchTool（末位消息匹配）+ 确认点创建 | — | DeepSeek API |
-| ToolRegistry | @Tool 注解扫描、JSON Schema 生成、反射调用，实现 IToolRegistry | — | Spring Bean |
-| DomainRouter | Layer1: 意图→领域分类，轻量 LLM 调用 | — | DeepSeek API |
-| ToolRetriever | Layer2: 领域内语义+频率工具召回 | — | EmbeddingClient + ToolVectorStore |
+| TradingAnalysisService | 个股交易分析编排 | — | LangChain4j② |
+| MarketDataService | 读取 batch_collect 采集的全市场数据 | — | Jackson |
+| MarketAnalysisService | 大盘分析编排（数据→DS V4→盘面研判） | — | LangChain4j② |
+| StockDataService | 个股数据获取（通过 ProcessBuilder 调用 Python） | — | ProcessBuilder + Jackson |
+| AgentService | ReAct㉓ 编排 + 确认回调㉕ | — | DeepSeek API㉔ |
+| ReActEngine | ReAct㉓ 循环 + autoMatchTool + 确认点创建 | — | DeepSeek API |
+| ToolRegistry | @Tool 注解扫描、JSON Schema 生成、反射调用 | — | Spring Bean |
+| DomainRouter | Layer1: 意图→领域分类 | — | DeepSeek API |
+| ToolRetriever | Layer2: 领域内语义+频率工具召回 | — | EmbeddingClient |
 | CapabilityGuard | Layer3: 执行前能力关键词校验 | — | 规则引擎 |
-| ToolVectorStore | 工具 Embedding 内存向量存储（余弦距离） | — | ConcurrentHashMap |
-| FrequencyTracker | 工具调用频率追踪（时间衰减） | — | ConcurrentHashMap |
-| ConversationStore | 会话上下文 Redis㉑ 存储（降级切 LocalCache，分 conversationId 锁），实现 IConversationStore | 6379 | Redis + Jackson |
+| ConversationStore | 会话上下文 Redis㉑ 存储（降级切 LocalCache） | 6379 | Redis + Jackson |
 | ConfirmationStore | 确认点 Redis㉑ 存储（降级切 LocalCache） | 6379 | Redis + Jackson |
-| LocalCache | 本地缓存：TTL 过期 + 容量上限逐出 | — | ConcurrentHashMap + ScheduledExecutor |
+| LocalCache | 本地缓存：TTL 过期 + 容量上限逐出 | — | ConcurrentHashMap |
 
 ### 3.2 核心接口抽象
 
-Batch 3 引入 4 个核心接口，所有消费者面向接口编程：
+| 接口 | 实现类 | 核心方法数 |
+|------|--------|-----------|
+| `ILlmService` | `LangChain4jLlmService` | 5 |
+| `IVectorSearchService` | `VectorService` | 6 + 1 静态方法 |
+| `IToolRegistry` | `ToolRegistry` | 7 |
+| `IConversationStore` | `ConversationStore` | 12 |
 
-| 接口 | 实现类 | 包 | 核心方法数 |
-|------|--------|-----|------------|
-| `ILlmService` | `LangChain4jLlmService` | service | 5 |
-| `IVectorSearchService` | `VectorService` | service | 6 + 1 静态方法 |
-| `IToolRegistry` | `ToolRegistry` | service | 7 |
-| `IConversationStore` | `ConversationStore` | store | 12 |
+### 3.3 LangChain4jLlmService — LLM 调用（唯一 LLM 服务）
 
-`IVectorSearchService` 还承载静态工具方法 `truncateContexts(List, int)` 和常量 `MAX_CONTEXT_CHARS`。
-
-### 3.3 LangChain4jLlmService — LLM 调用
-
-基于 LangChain4j 0.33.x `OpenAiChatModel` 适配 DeepSeek API（OpenAI 兼容），实现 `ILlmService` 接口。替代旧版 `DeepSeekService`（基于 RestTemplate + 自定义 DTO）。
+基于 LangChain4j 0.33.x `OpenAiChatModel` 适配 DeepSeek API（OpenAI 兼容）。
 
 ```
 LangChain4jLlmService
@@ -258,314 +299,14 @@ LangChain4jLlmService
 └── chatStream(msg, callback) → StreamingChatLanguageModel.generate()
 ```
 
-- 请求地址：`${deepseek.base-url}/v1`（OpenAiChatModel 自动拼接 `/chat/completions`）
-- 鉴权：`Authorization: Bearer ${deepseek.api-key}`
-- 模型：`deepseek-v4-flash`（通过 `openai.chat.model` 配置）
-- 接口全部使用 **LangChain4j 原生类型**：`ChatMessage`（`SystemMessage` / `UserMessage` / `AiMessage` / `ToolExecutionResultMessage`）、`Response<AiMessage>`、`ToolSpecification`
-- 已删除旧版自建 DTO：`DeepSeekChatRequest`、`DeepSeekChatResponse`、`Message`、`ToolCall`、`FunctionCall`
-- 流式模式：通过 `StreamingChatLanguageModel.generate()` + `StreamingResponseHandler` 回调
+- 模型：`deepseek-v4-flash`
+- 所有消费者（聊天、Agent、交易分析、大盘分析）共用此单一 LLM 服务
 
-### 3.4 VectorService — 向量检索与混合检索
-
-实现 `IVectorSearchService` 接口。Batch 2 将 Qdrant HTTP 通信提取为 `QdrantClient`、Embedding + 缓存提取为 `EmbeddingClient`，VectorService 自身专注于混合检索编排（844→260 行）。
-
-#### 3.4.1 初始化
-
-启动时委托 `QdrantClient.init()` 检测 collection 并自动创建（768 维、Cosine⑦ 距离）；`createCollection` 改为直接 PUT + 忽略 409（collection 已存在）。
-
-#### 3.4.2 Embedding③
-
-委托 `EmbeddingClient.embed(text)` → Ollama⑫ `/api/embed`，nomic-embed-text⑬ 768 维向量④，含 5 分钟 LRU 缓存。
-
-#### 3.4.3 混合检索流程
-
-```
-searchDocsWithFullContent(question, limit)
-  │
-  ├── searchHybrid(question, limit*2, docCollection, docVectorName)
-  │     │
-  │     ├── embeddingClient.embed(question)    # Embedding③ (5min 缓存)
-  │     ├── qdrantClient.search()             # Qdrant⑤ 向量④搜索
-  │     │     └── 关键词加权排序                # VECTOR_WEIGHT=0.6
-  │     │
-  │     ├── meiliSearchService.search()       # Meilisearch⑧ BM25⑨ 全文
-  │     │
-  │     └── rrfMerge()               # RRF⑩ (k=60) 合并两路结果
-  │
-  └── 上下文扩展
-        └── qdrantClient.scrollWithRange()    # 按文件+chunk⑪范围获取相邻chunk
-```
-
-**关键词加权**：从 query 中提取中英文关键词，计算每个结果中关键词的命中比例，按 `0.6 * vector_score + 0.4 * keyword_score` 重排。
-
-**RRF⑩ 合并**：对 Qdrant⑤ 和 Meilisearch⑧ 两路结果按 `1 / (k + rank)` 公式计算 RRF 得分，k=60，合并后按得分降序排列。这样即使某一路漏掉了某个结果，另一路也能补上。
-
-**上下文扩展**：对命中的结果，按文件分组，取匹配 chunk⑪ 前后各 2 个 chunk 拼接到一起，提供更完整的上下文。
-
-### 3.5 MeiliSearchService⑧ — 全文搜索
-
-封装 Meilisearch REST API 的搜索调用：
-- `search(index, query, limit)` → `POST /indexes/{index}/search`
-- 返回结构与 VectorService 的 `parseSearchResults` 兼容
-- 搜索失败时返回空列表（非致命降级）
-
-### 3.6 GeneralRagService① — RAG 编排
-
-```
-ragChat(question, limit)
-  ├── vectorService.searchDocsWithFullContent(question, limit)
-  │     └── 内部：混合检索(RRF⑩合并) + 上下文扩展
-  ├── filterAndTruncate()              # score ≥ 0.01 过滤 + 12000字符截断
-  └── deepSeekService.chatWithSystem(prompt, question)
-       └── prompt = 参考内容 + 用户问题
-```
-
-**质量保障**：
-- RRF⑩ 得分阈值 0.01（约等于在一路检索中排名前 40）：低于此值的结果不进入 LLM②，减少噪声
-- 上下文截断 12000 字符（约 6000 tokens⑭），控制送入 LLM② 的知识量
-- 空上下文降级为纯 LLM 回答
-
-### 3.7 FileParser — 文件解析
-
-| 格式 | 解析方式 | 依赖 |
-|------|----------|------|
-| .docx | XWPFWordExtractor | poi-ooxml |
-| .xlsx / .xls | XSSFWorkbook → 逐行逐列 | poi-ooxml |
-| .txt / .md / .csv / .json / .xml / .yml / .properties / .html / .css | Files.readString | — |
-
-### 3.8 AgentService㉒ — ReAct㉓ 引擎
-
-核心循环：三层路由引擎前置过滤工具，LLM 交替进行推理和工具调用㉔，直至生成最终回答或达到最大轮次。
-
-#### 3.8.1 Chat 入口流程
-
-```
-AgentService.chat(conversationId, userMessage)
-   │
-   ▼
-┌─ Layer 1: 领域路由 ──────────────────┐
-│  DomainRouter.classify()             │
-│  LLM 判断用户意图 → 选择一个 ToolDomain │
-│  （任务管理 / 代码仓库 / CI_CD / ……）    │
-└──────────────────────────────────────┘
-   │
-   ▼
-┌─ Layer 2: 工具召回 ──────────────────┐
-│  ToolRetriever.retrieve(domain, topK)│
-│  语义向量检索 + 频率衰减补全           │
-│  → 取 topK 工具 Schema 传给 LLM      │
-└──────────────────────────────────────┘
-   │
-   ▼
-① RAG 检索知识库 → 拼入 system prompt
-   │
-   ▼
-② 获取/初始化 messages list
-   │
-   ├─ 首次消息: [system(含知识库)]
-   │   planConfirmed=false, approvedPlan=null
-   │
-   └─ 后续消息: [+ 历史对话]
-       planConfirmed 保持不变（首次确认后=true）
-       approvedPlan=null（清除旧计划）
-   │
-   ▼
-③ 追加 UserMessage → ReAct㉓ 循环
-```
-
-#### 3.8.2 ReAct㉓ 循环（agentLoop）
-
-```
-ReAct 循环 (max 10 轮)
-   │
-   ├─ 调用 LLM（带 ToolSpecification 列表）
-   │
-   ├─ 无 toolExecutionRequests
-   │    │
-   │    ├─ 自动匹配（autoMatchTool，仅第 1 轮）
-   │    │    └─ 匹配成功:
-   │    │         ├─ 工具刚执行过? → 跳过，返回 LLM 文本
-   │    │         ├─ planConfirmed? → 执行（READ/WRITE 共同决定）
-   │    │         └─ !planConfirmed → 生成计划确认点
-   │    │
-   │    └─ 匹配失败 → 返回最终回答 ✅
-   │
-   └─ 有 toolExecutionRequests
-         │
-         ├─ planConfirmed = false
-         │   → 生成操作计划确认点㉕（READ+WRITE 均需确认）
-         │     存 checkpoint 后 return，等用户确认
-         │
-         └─ planConfirmed = true → 逐个执行
-              │
-              ├─ approvedPlan != null → 过滤不在计划内的工具
-              │  （首次确认后有效，后续消息已清空）
-              │
-              ├─ Layer 3: CapabilityGuard.validate()
-              │  用户消息 vs 工具能力关键词 → 拒绝则回送 LLM
-              │
-              ├─ FrequencyTracker 记录调用
-              │
-              ├─ READ 工具 → 直接执行
-              │
-              └─ WRITE 工具
-                   ├─ 白名单 → 直接执行
-                   └─ 非白名单 → 生成二次确认点㉕
-                             等用户确认后 handleExecConfirm 执行
-```
-
-**双重确认机制㉕**（按对话生命周期不同行为）：
-
-| 阶段 | READ 工具 | WRITE 工具 |
-|------|-----------|-----------|
-| 首次消息（plan 未确认） | 需要 plan 确认 | 需要 plan 确认 |
-| 首次消息（plan 已确认） | 直接执行 | 需要 exec 二次确认 |
-| 后续消息 | 直接执行 | 需要 exec 二次确认 |
-
-- **确认点 #1（操作计划确认）**：LLM 返回 ToolExecutionRequest 且 `planConfirmed=false` 时触发，用户确认后开始逐项执行
-- **确认点 #2（写操作二次确认）**：非白名单 WRITE 操作逐项确认，防止误写
-- plan 状态跨消息管理：首次确认后 `planConfirmed=true` 持久化，下条新消息自动继承
-- **状态清理**：新消息追加时清除旧 `approvedPlan`，但保留 `planConfirmed=true`
-
-#### 3.8.3 autoMatchTool — 自动工具匹配
-
-当 LLM 未调用工具且本应为某个工具触发时，autoMatchTool 作为兜底机制：
-
-```
-autoMatchTool(messages, toolSchemas)
-   │
-   ├─ 从后向前查找最后一个 UserMessage（非首个）
-   ├─ 遍历关键词规则表匹配
-   │    例: "买入" → buy_stock, "净值" → query_stock_nav
-   └─ 返回匹配到的 ToolExecutionRequest
-```
-
-**保护措施**：
-- 匹配前检查该工具结果是否已在对话中（`ToolExecutionResultMessage`）→ 跳过，直接返回 LLM 文本
-- 仅在第 1 轮迭代 (`i == 0`) 触发，避免循环自动匹配
-
-#### 3.8.4 SubAgent — 子 Agent 执行器
-
-被 `MultiAgentTools.delegateTask` 调用，在主 Agent 的 ReAct 循环内独立执行子任务：
-
-```
-主 Agent 识别到需要其他领域专家处理
-  → 调用 delegate_task 工具
-    → SubAgent.execute(task, domain)
-      → 限定于目标领域的工具列表（如 FINANCE 只有金融工具）
-      → mini ReAct 循环（最多 3 轮，无确认流程）
-      → 返回最终结果给主 Agent
-```
-
-特点：无 Redis 持久化、无确认流程、工具域隔离——子 Agent 只管执行并返回，结果由主 Agent 汇总统筹。
-
-#### 3.8.5 AgentFallback — 兜底回复
-
-当 Agent 链路异常时（无匹配工具、工具调用失败、LLM 异常、满 10 轮），生成用户友好的中文兜底消息，避免将技术异常暴露给用户。
-
-**类型现代化（Phase 3）**：
-
-- 全部使用 **LangChain4j 0.33.x 原生类型**：`ChatMessage`（`SystemMessage` / `UserMessage` / `AiMessage` / `ToolExecutionResultMessage`）、`Response<AiMessage>`、`ToolExecutionRequest`、`ToolSpecification`
-- 已删除旧版自建 DTO：`DeepSeekChatRequest`、`DeepSeekChatResponse`、`Message`、`ToolCall`、`FunctionCall`、`DeepSeekResponseNormalizer`
-- `ConversationStore` 消息通过 `ChatMessageJsonUtil` 序列化（标准 OpenAI 消息格式，Jackson 手动 toMap/fromMap）
-- `ConfirmationStore` pending requests 通过 `List<Map<String,String>>` 序列化（`ToolExecutionRequest` 为 LC4j 不可变类，不可直接 Jackson 序列化）
-- `LlmContext` 通过 ThreadLocal 在 LLM 调用链路中传递当前 conversationId，替代方法参数传递
-
-### 3.9 ToolRegistry — 工具注册中心
-
-```
-启动时：
-  @PostConstruct → 扫描所有 Bean → 收集 @Tool 注解方法
-  → 注册到 Map<String, ToolMeta> → 可生成 LangChain4j ToolSpecification 列表
-
-运行时：
-  execute(ToolExecutionRequest) → 反射调用对应方法 + 10s 超时保护
-  isAutoConfirm(toolName) → 判断是否在白名单中（跳过二次确认㉕）
-```
-
-### 3.10 ConversationStore — 会话存储
-
-- 存储位置：Redis㉑ `conversation:{conversationId}`（String 类型 + Jackson JSON）
-- 存储内容：消息历史（ChatMessage 列表通过 `ChatMessageJsonUtil` 序列化为 JSON 字符串）、checkpoint 轮次、planConfirmed 标志、已批准的操作计划
-- 过期策略：Redis TTL 30 分钟，无访问自动过期
-- **降级策略**：Redis 不可用时自动切换 `LocalCache`（1000 条容量上限 / 30 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
-
-### 3.11 ConfirmationStore — 确认点存储
-
-- 存储位置：Redis㉑ `confirmation:{confirmationId}`（String 类型 + Jackson JSON）
-- 两种类型：plan（操作计划确认，planToolCalls 存为 `List<Map>`）、exec（写操作二次确认，pendingRequests 通过 `List<Map<String,String>>` 序列化）
-- 过期策略：Redis TTL 5 分钟
-- **降级策略**：Redis 不可用时自动切换 `LocalCache`（500 条容量上限 / 5 分钟 TTL / 超限随机逐出），Redis 恢复后静默切回
-
-### 3.12 ingest.py — 文档摄入管线
-
-```
-ingest.py <directory> [options]
-
-流程（每次运行）:
-  1. 扫描目录，收集所有支持的文件
-  2. 读取文件内容 + 计算 MD5⑱ hash
-  3. 从 Qdrant⑤ 读取已索引文件的 hash 列表
-  4. 对比 diff：
-     ├── hash 一致 → 跳过
-     ├── 新增/修改 → 分块⑪ → embedding③ → 写 Qdrant → 写 Meilisearch⑧
-     └── 已删除    → 从 Qdrant + Meilisearch 删除
-```
-
-**分片⑪ 策略**：
-
-| 文件类型 | 分片方式 |
-|----------|----------|
-| .md / .markdown | 按 `##` 标题切分 |
-| .txt / .docx / .pptx / .html | 按段落合并，滑动窗口 200~1500 字符 |
-| .py / .js / .ts / .go / .java 等代码 | 按函数/类边界切分 |
-| .png / .jpg / .gif / .webp | llava 视觉模型生成文字描述 |
-
-**双路写入**：
-
-```
-分块⑪ → embedding③ → Qdrant⑤ (向量④)
-   └→ 同时写入 → Meilisearch⑧ (全文)
-```
-
-向 Qdrant 写入向量④ 的同时写入 Meilisearch⑧，实现向量搜索 + 关键词搜索双路覆盖。
-
-**监听模式**（`--watch`）：
-- 启动时先增量同步
-- 通过 watchdog⑲ 监听文件变更
-- 2 秒防抖⑳，避免频繁重复索引
-- 增删改自动同步
+### 3.4 ~ 3.12 （Agent 引擎、向量检索、文档摄入等组件保持不变，详见原文档）
 
 ---
 
-## 四、并发与性能优化
-
-### 4.1 HTTP 连接池
-
-RestTemplate 使用 Apache HttpClient 连接池，避免每次请求创建新连接：
-
-| 参数 | 值 | 说明 |
-|------|:--:|------|
-| 最大总连接 | 32 | 支撑公司初期并发 |
-| 单路由最大连接 | 8 | 每个目标服务（Ollama/Qdrant/Meilisearch）最多 8 个并发 |
-| 连接超时 | 5s | 建立连接超时 |
-| 读取超时 | 30s | 等待响应超时，Ollama embedding 可能较慢 |
-
-### 4.2 Embedding 缓存
-
-相同查询文本在 **5 分钟内** 不重复调用 Ollama，直接返回缓存向量：
-
-```
-用户A 搜索 "什么是微服务"  →  embedding调用 → 缓存
-用户B 5秒后搜同样的问题 →  命中缓存，跳过 Ollama
-```
-
-- 缓存上限 1000 条，超限时惰性淘汰过期项
-- 适用于高频重复查询场景（如团队多人搜索同一知识点）
-
----
-
-## 五、API 接口
+## 四、API 接口
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -578,67 +319,124 @@ RestTemplate 使用 Apache HttpClient 连接池，避免每次请求创建新连
 | POST | `/api/chat/knowledge/search` | 纯检索（不经 LLM②） |
 | POST | `/api/knowledge/ingest/doc` | 文档摄入 |
 | POST | `/api/knowledge/sync/meilisearch` | Qdrant⑤ → Meilisearch⑧ 全量同步 |
-| POST | `/api/agent/chat` | Agent㉒ 对话入口（非流式），传入 `conversation_id` 继续已有会话 |
-| POST | `/api/agent/confirm` | Agent 确认回调㉕（确认/拒绝/反馈），支持 `conversation_id` + `confirmation_id` + `confirm` + `feedback` |
+| POST | `/api/agent/chat` | Agent㉒ 对话入口 |
+| POST | `/api/agent/confirm` | Agent 确认回调㉕ |
+| POST | `/api/trading/analyze` | **个股交易分析**：输入 `symbol` + 可选 `request`，返回报价 + 技术指标 + DS V4 Flash 分析 |
+| POST | `/api/trading/batch` | 批量分析多个股票 |
+| GET | `/api/trading/quote/{symbol}` | 查询实时报价 |
+| GET | `/api/trading/indicators/{symbol}` | 查询技术指标（不调 LLM） |
+| GET | `/api/trading/search?q=` | 搜索股票（代码或名称），返回匹配列表 |
+| POST | `/api/trading/market-analysis` | **大盘分析**：基于每日全量数据，DS V4 Flash 输出盘面情绪、关注板块、个股 |
 
 ---
 
-## 六、数据结构
+## 五、交易分析系统
 
-### 6.1 Qdrant⑤ Payload
+### 5.1 个股分析流程
 
-```json
-{
-  "text": "chunk⑪ 文本内容",
-  "chunk_index": 0,
-  "total_chunks": 5,
-  "file_path": "/path/to/file.md",
-  "file_name": "file.md"
-}
+```
+POST /api/trading/analyze { symbol: "600519" }
+        │
+        ▼
+┌─ TradingAnalysisService ──────────────────────────────────┐
+│                                                           │
+│ ① StockDataService（Python ProcessBuilder）                │
+│    ├── 实时行情  ← Sina Finance㉖ / 东方财富 / yfinance      │
+│    ├── 历史 K 线 ← 东方财富 / Sina                           │
+│    ├── 技术指标  ← 本地计算（MA/RSI/MACD/波动率/支撑阻力）    │
+│    └── 基本面    ← 东财数据中心（F10 财报，仅A股）            │
+│                                                           │
+│ ② MarketDataService（大盘背景注入）                        │
+│    ├── 大盘指数（7 个）                                     │
+│    ├── 全市场涨跌比、涨停跌停统计                              │
+│    ├── 个股所属行业板块表现                                    │
+│    ├── 个股 vs 板块相对强度                                    │
+│    └── 个股是否在今日 TOP 榜单中                               │
+│                                                           │
+│ ③ 构建结构化提示词 → 调用 DeepSeek V4 Flash                │
+│    └── 输出: 大盘背景→趋势研判→技术位→交易建议→基本面→风险    │
+│                                                           │
+│ ④ 返回 JSON（报价 + 指标 + 大盘上下文 + LLM 分析报告）      │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
 ```
 
-### 6.2 Meilisearch⑧ Document
+### 5.2 大盘分析流程
 
-```json
-{
-  "id": "md5⑱(chunk_text)",
-  "text": "chunk 文本内容",
-  "file_path": "/path/to/file.md",
-  "file_name": "file.md",
-  "chunk_index": 0,
-  "file_type": ".md",
-  "file_hash": "md5(原文件)"
-}
 ```
+POST /api/trading/market-analysis
+        │
+        ▼
+┌─ MarketAnalysisService ───────────────────────────────────┐
+│                                                           │
+│ ① 读取当日全市场数据（training.json）                      │
+│    ├── 7 大指数                                            │
+│    ├── 涨跌家数、涨跌比、涨停跌停、涨跌分布                     │
+│    ├── 行业板块排行（109 个板块，涨幅前20 + 跌幅前20）         │
+│    └── TOP 个股榜单（涨幅/跌幅/成交额各 TOP10）               │
+│                                                           │
+│ ② 构建结构化 Prompt → 调用 DeepSeek V4 Flash              │
+│    └── 输出: 盘面综述→板块关注→个股关注→后市研判             │
+│                                                           │
+│ ③ 返回 JSON（指数+统计数据+TOP榜单+LLM分析报告）            │
+│                                                           │
+└───────────────────────────────────────────────────────────┘
+```
+
+### 5.3 数据采集（batch_collect.py）
+
+每个交易日 15:30 定时执行：
+
+| 步骤 | 耗时 | 数据量 |
+|------|------|--------|
+| ① 加载股票清单（缓存） | ~0s | ~5500 只 |
+| ② 获取大盘指数（7个） | ~1s | 上证/深证/创业/科创/300/50/500 |
+| ③ 行业映射（F10 并发 50 线程） | ~10s | ~5300 只含行业 (覆盖率 97%+) |
+| ④ 全市场个股快照（Sina 批量 7批） | ~8s | ~5300 只 OHLC + 成交量 |
+| ⑤ 涨跌统计 + 板块聚合 | ~1s | 涨跌分布 + 109 个板块排行 |
+| ⑥ 存储（gzip + JSON） | ~0.3s | ~200KB/天 |
+| **总计** | **~20s** | |
+
+行业映射通过**东方财富 F10 公司概况接口**并发获取（50 线程 ThreadPoolExecutor），首次运行约 10 秒完成 5400 只股票的行业分类，后续运行只补充新股票。
+
+### 5.4 前端页面
+
+| 页面 | 路由 | 功能 |
+|------|------|------|
+| 📈 交易分析 | `/trading` | 输入股票代码/名称搜索，查看实时报价 + 技术指标 + LLM 分析报告 |
+| 📊 大盘分析 | `/market` | 点击分析今日大盘，展示指数、统计、TOP 榜单、LLM 盘面研判 |
+| 其他 | /chat, /agent, /knowledge-qa, ... | 通用聊天、Agent、知识库等功能 |
+
+前端使用 Vue 3 + TypeScript + Vite，通过 `/api` 代理到 Java 后端 (localhost:8081)。分析结果通过 `localStorage` 持久化，页面刷新/切换不丢失。
 
 ---
 
-## 七、配置说明
+## 六、配置说明
 
 > ⚠️ **安全警告**：`application.yml` 中的 `deepseek.api-key` 使用 `${DEEPSEEK_API_KEY}` 占位符，**禁止直接写入真实 key**。
-> 真实 key 通过环境变量或 IDE Run Configuration 传入，防止误提交到 git 仓库。
 
 ```yaml
 deepseek:
   api-key: ${DEEPSEEK_API_KEY}
   base-url: https://api.deepseek.com
+  model: deepseek-v4-flash
 
 qdrant:
   host: localhost
   port: 16333
-  doc-collection: aiknowledge-doc    # collection⑥ 名称
+  doc-collection: aiknowledge-doc
 
 ollama:
   host: localhost
   port: 11434
-  model: nomic-embed-text⑬
+  model: nomic-embed-text
 
 meilisearch:
   host: localhost
   port: 7700
 
 spring:
-  redis:                              # Agent㉒ 会话 & 确认点存储
+  redis:
     host: localhost
     port: 6379
     timeout: 2000
@@ -652,81 +450,60 @@ tool:
 store:
   conversation:
     local-cache:
-      max-capacity: 1000        # Redis 降级本地缓存上限
-      ttl-minutes: 30            # 降级缓存条目 TTL
+      max-capacity: 1000
+      ttl-minutes: 30
   confirmation:
     local-cache:
-      max-capacity: 500          # 确认点本地缓存上限
-      ttl-minutes: 5             # 确认点缓存 TTL（与 Redis 一致）
+      max-capacity: 500
+      ttl-minutes: 5
 ```
 
 ---
 
-## 八、基础设施
+## 七、基础设施
 
 | 组件 | 版本 | 启动方式 |
 |------|------|----------|
 | Qdrant⑤ | v1.18.0 | Docker (`qdrant/qdrant:v1.18.0`) |
 | Meilisearch⑧ | 1.43.0 | Homebrew (`brew services start meilisearch`) |
 | Redis㉑ | 7.x | Homebrew (`brew services start redis`) |
-| Ollama⑫ | 0.23.2 | 本地运行 |
-| Embedding③ 模型 | nomic-embed-text⑬ | `ollama pull nomic-embed-text` |
+| Ollama⑫ | 0.23.2 | `brew services start ollama`（仅 nomic-embed-text） |
+| nomic-embed-text⑬ | 137M | `ollama pull nomic-embed-text` |
 | Java | 11 | Maven 管理 |
-| Python | 3.11 | Homebrew，虚拟环境 `.venv`（`pip install -r requirements.txt`） |
+| Python | 3.11 | Homebrew |
+| Node.js | 20+ | Homebrew（前端构建） |
 
 ---
 
-## 九、关键设计决策
+## 八、关键设计决策
 
 | 决策 | 选择 | 理由 |
 |------|------|------|
-| 向量数据库 | Qdrant⑤ | 轻量、Docker 一键部署、支持 named vectors |
-| 全文搜索引擎 | Meilisearch⑧ | 比 ES 更轻量，32GB 内存可运行，BM25⑨ 算法 |
-| Embedding③ | Ollama⑫ 本地 nomic-embed-text⑬ | 本地运行，无 API 费用，768 维 |
-| LLM② | DeepSeek API | 性价比高，1M context window⑮ |
-| 检索策略 | 向量④ + BM25⑨ 双路 + RRF⑩ 合并(k=60) | 语义+关键词互补，提高召回率 |
-| 低分过滤阈值 | RRF 得分 ≥ 0.01 | RRF 得分非绝对值，阈值过低无意义，过高则丢失结果；0.01 ≈ 单路前 40 名 |
-| 上下文截断 | 12000 字符 | 限制送入 LLM 的知识量，减少噪声 |
-| **Agent㉒ 模式** | **ReAct㉓ 循环 + HITL㉕ 双重确认** | **LLM 自主规划执行，关键写操作人工兜底** |
-| **会话持久化** | **Redis㉑ String + JSON** | **比内存方案更可靠，TTL 自动过期无需定时清理；Jackson 手动序列化避免 JDK 序列化兼容问题** |
-| **二次确认㉕ 策略** | **WRITE + 非白名单 → 确认点** | **白名单（飞书等可信操作）自动执行，非白名单写操作逐项确认，平衡效率与安全** |
-| **路由架构** | **三层路由：DomainRouter → ToolRetriever → CapabilityGuard** | **逐层过滤工具空间，减少 LLM 误调用、提高准确率** |
-| **领域分类** | **LLM 轻量调用（DeepSeek + 简短系统提示）** | **比关键词匹配更准确理解用户意图，比完整 ReAct 更轻量（单次调用）** |
-| **工具召回** | **语义 Embedding（nomic-embed-text）+ 频率衰减补全** | **语义检索找到功能匹配的工具，频率补全兜底冷启动和 Embedding 失败** |
-| **能力校验** | **关键词规则引擎（CapabilityKeywords 中英文 11 组映射）** | **极低延迟（纯内存匹配），拒绝明显不匹配的调用，减少 LLM 幻觉执行** |
-| **LLM 调用框架** | **LangChain4j 0.33.x OpenAiChatModel** | **替代 RestTemplate + 自定义 DTO，原生支持 tool calling、streaming、多态消息类型，减少自建代码和维护成本** |
-| DeepSeek V4 `reasoning_content` 轮播 | LangChain4j OpenAiChatModel 内部透传非标准字段 | V4 thinking mode 强制要求回传此字段，否则 HTTP 400 |
-| **Plan 生命周期** | **planConfirmed 持久化跨消息，approvedPlan 每新消息清空** | **首次确认后后续 READ 免确认；旧计划不污染新请求，WRITE 仍走 exec 确认** |
-| **autoMatchTool 末位策略** | **从后向前查找最后一个 UserMessage + 跳过已执行工具** | **避免匹配历史旧消息导致误触发；工具执行完毕后直接返回 LLM 文本** |
-| **工具参数类型匹配** | **@ToolParam number 对应 Java Integer，而非 String** | **LLM 返回 JSON number 类型，反射调用时 Integer 自动匹配，避免 argument type mismatch** |
-| 降级策略 | 组件异常时静默降级 | 不阻塞主流程 |
+| 向量数据库 | Qdrant⑤ | 轻量、Docker 一键部署 |
+| 全文搜索引擎 | Meilisearch⑧ | 比 ES 轻量，BM25⑨ 算法 |
+| Embedding③ | Ollama⑫ 本地 nomic-embed-text⑬ | 无 API 费用，768 维 |
+| LLM② | DeepSeek V4 Flash（云端 API） | 唯一 LLM，性价比高，1M context window⑮ |
+| 检索策略 | 向量④ + BM25⑨ 双路 + RRF⑩ 合并(k=60) | 语义+关键词互补 |
+| **Agent㉒ 模式** | **ReAct㉓ 循环 + HITL㉕ 双重确认** | **自动规划 + 人工兜底** |
+| **路由架构** | **三层路由：DomainRouter → ToolRetriever → CapabilityGuard** | **逐层过滤工具空间** |
+| **LLM 调用框架** | **LangChain4j 0.33.x OpenAiChatModel** | **原生 tool calling、streaming** |
+| **交易分析 LLM** | **DeepSeek V4 Flash（统一 LLM 架构）** | **删除本地 Qwen2.5，简化架构。数据拉取 + API 推理，不存训练数据** |
+| **大盘分析** | **MarketDataService 读取 batch_collect 数据 → MarketAnalysisService 调用 DS V4 Flash** | **复用全市场采集数据，LLM 自主研判** |
+| 金融数据源 | Sina Finance ㉖（批量不限流）+ 东方财富 ㉗（F10 并发 50 线程） | 批量用新浪，行业映射用东财 F10 并发 |
+| 数据采集 | ProcessBuilder 调 Python 脚本 | Java 编排流程、Python 执行数据获取 |
+| 股票搜索 | 本地 stocks_list.json + 30 只常用美股硬编码 | A 股按代码/名称模糊匹配，美股覆盖主流 |
 
 ---
 
-## 十、健壮性保障
+## 九、健壮性保障
 
 | 场景 | 处理方式 |
 |------|----------|
 | Qdrant⑤ 不可用 | 启动时打警告延迟初始化 |
 | Meilisearch⑧ 不可用 | 搜索返回空列表，不中断 |
-| 低分结果 | RRF⑩ score < 0.01 过滤，不进 LLM②（等价于在一路检索中排名前 40 以上才保留） |
-| 上下文超长 | 按 score 排序截断至 12000 字符 |
-| Ollama⑫ embedding③ 失败 | 3 次重试，指数退避 |
-| 文件读取异常 | 跳过该文件，不中断整体流程 |
-| **Redis 连接断开** | **ConversationStore / ConfirmationStore 自动切换 LocalCache（本地内存），Redis 恢复后静默切回** |
-| **本地缓存超限** | **LocalCache 随机逐出旧条目 + 定时清理过期条目（基于 createdAt），防止 OOM** |
-| **DeepSeek API 网络错误** | **RestTemplate⑰ 5s 连接超时，捕获 `ResourceAccessException`，重试 1 次** |
-| **DeepSeek API 限流 (429)** | **等待 2s 后重试，最多 2 次，仍失败返回"请求过于频繁"** |
-| **DeepSeek API 鉴权失败 (401)** | **不重试，记录错误日志，返回"API 认证失败"** |
-| **Tool㉔ 执行异常** | **异常信息以 tool role 回送 LLM，由 LLM 决定重试或告知用户** |
-| **Tool 超时** | **单次执行 10s 超时保护，超时信息回送 LLM** |
-| **ReAct㉓ 满 10 轮** | **返回已有结果 + 提示"任务可能未完全执行"** |
-| **确认点过期 (TTL 5min)** | **Redis㉑ 自动过期，返回"确认已过期，请重新提问"** |
-| **确认点重复消费** | **consumed 标志去重，返回"该操作已处理"** |
-| **Tool 不在已批准计划中** | **跳过该调用，追加 system 提示** |
-| **无工具匹配用户意图** | **AgentFallback.noSuitableTool()，返回"没有找到能处理该请求的工具"** |
-| **LLM API 异常** | **AgentFallback.apiUnavailable()，返回"大脑暂时离线，请稍后再试"** |
-| **Tool 调用返回异常** | **AgentFallback.toolExecutionFailed(name, detail)，异常回送 LLM 决定重试或告知用户** |
-| **CapabilityGuard 校验不通过** | **拒绝执行，错误回送 LLM，由 LLM 修正调用或改用其他方式** |
-| **DeepSeek V4 missing `reasoning_content`** | **LangChain4j OpenAiChatModel 内部透传非标准字段，确保 reasoning_content 在请求中保留并回传** |
-| **DeepSeek V4 orphaned `assistant(tool_calls)`** | **400 "must be followed by tool messages" → AgentService.removeLastAssistantMessage() 注入新消息前移除 orphaned AiMessage** |
+| Redis 连接断开 | ConversationStore / ConfirmationStore 自动切换 LocalCache |
+| DeepSeek API 网络错误 | RestTemplate⑰ 5s 连接超时，重试 1 次 |
+| DeepSeek API 限流 (429) | 等待 2s 后重试，最多 2 次 |
+| Python 子进程失败 | StockDataService 返回 `error` 字段，TradingAnalysisService 静默降级 |
+| 股票数据获取失败 | 返回 `llmError`/`error` 字段，前端展示降级提示 |
+| 行业映射获取失败 | 增量补充，逐次累计，非致命 |

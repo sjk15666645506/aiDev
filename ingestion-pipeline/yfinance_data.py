@@ -267,17 +267,15 @@ def sina_quote(symbol):
 
 
 def is_etf_code(symbol):
-    """判断 6 位数字代码是否为 A 股 ETF/LOF 基金。"""
+    """判断 6 位数字代码是否为 A 股场内 ETF。"""
     s = symbol.strip()
     if not re.match(r"^\d{6}$", s):
         return False
     # 上海 ETF: 510xxx-519xxx, 560xxx-569xxx, 580xxx-589xxx
     # 深圳 ETF: 159xxx
-    # 深圳 LOF: 150xxx, 164xxx-166xxx
-    # 上海 LOF: 501xxx-502xxx
-    if s.startswith(("51", "56", "58", "50")):
+    if s.startswith(("51", "56", "58")):
         return True
-    if s.startswith(("15", "16")):
+    if s.startswith("159"):
         return True
     return False
 

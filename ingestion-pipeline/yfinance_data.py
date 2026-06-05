@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""
-金融数据获取脚本 —— 通过 Sina / 东方财富 / yfinance 获取股票行情和技术指标。
+"""金融数据获取脚本 —— 通过 Sina / 东方财富 / yfinance 获取股票/ETF 行情和技术指标。
 供 Java 后端通过 ProcessBuilder 调用，输出 JSON 到 stdout。
 
 用法：
   python3 yfinance_data.py quote <symbol>
   python3 yfinance_data.py history <symbol> <period> <interval>
   python3 yfinance_data.py full <symbol>
+  python3 yfinance_data.py etf-full <symbol>
 """
 import sys
 import json
@@ -159,12 +159,28 @@ def sina_quote(symbol):
         }
 
 
+def is_etf_code(symbol):
+    """判断 6 位数字代码是否为 A 股 ETF/LOF 基金。"""
+    s = symbol.strip()
+    if not re.match(r"^\d{6}$", s):
+        return False
+    # 上海 ETF: 510xxx-519xxx, 560xxx-569xxx, 580xxx-589xxx
+    # 深圳 ETF: 159xxx
+    # 深圳 LOF: 150xxx, 164xxx-166xxx
+    # 上海 LOF: 501xxx-502xxx
+    if s.startswith(("51", "56", "58", "50")):
+        return True
+    if s.startswith(("15", "16")):
+        return True
+    return False
+
+
 def _to_sina_symbol(symbol):
     """转换用户输入的符号为新浪格式。"""
     s = symbol.upper().strip()
-    # 数字代码 → A股
+    # 数字代码 → A股/ETF
     if re.match(r"^\d{6}$", s):
-        if s.startswith(("6", "9")):
+        if s.startswith(("6", "9", "5", "50", "56", "58")):
             return f"sh{s}"
         return f"sz{s}"
     # 已知美股/港股
@@ -184,6 +200,9 @@ def _to_sina_symbol(symbol):
         return "baba"  # NYSE
     if s == "0700.HK":
         return "hk00700"
+    # 美股 ETF（yfinance 格式，直接透传）
+    if s.isalpha():
+        return None  # 走 yfinance
     return None
 
 
@@ -240,6 +259,192 @@ def eastmoney_quote(symbol):
         }
     except Exception:
         return None
+
+
+# ═══════════════════════════════════════════════════════════════
+#  数据源：东方财富（A 股 ETF 基金）
+# ═══════════════════════════════════════════════════════════════
+
+def eastmoney_etf_quote(symbol):
+    """从东方财富获取 A 股 ETF 实时报价（含基金净值、溢价率）。"""
+    if not re.match(r"^\d{6}$", symbol):
+        return None
+
+    # 行情数据（与股票共用推送接口）
+    market = "1" if symbol.startswith(("5", "50", "56", "58")) else "0"
+    url = f"https://push2.eastmoney.com/api/qt/stock/get?secid={market}.{symbol}&fields=f43,f44,f45,f46,f47,f48,f50,f57,f58,f170,f100,f703"
+
+    _em_limiter.wait()
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://quote.eastmoney.com",
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read().decode("utf-8")).get("data", {})
+        if not data:
+            return None
+
+        name = data.get("f58", "")
+        price = (data.get("f43", 0) or 0) / 100.0
+        high = (data.get("f44", 0) or 0) / 100.0
+        low = (data.get("f45", 0) or 0) / 100.0
+        open_p = (data.get("f46", 0) or 0) / 100.0
+        volume = data.get("f47", 0) or 0
+        amount = data.get("f48", 0) or 0
+        change_pct = (data.get("f170", 0) or 0) / 100
+
+        prev_close = round(price / (1 + change_pct / 100), 2) if change_pct != -100 else 0
+        change = round(price - prev_close, 2)
+
+        result = {
+            "symbol": symbol.upper(),
+            "name": name,
+            "price": price,
+            "change": change,
+            "changePercent": round(change_pct, 2),
+            "prevClose": prev_close,
+            "open": open_p,
+            "dayHigh": high,
+            "dayLow": low,
+            "volume": int(volume * 100) if volume else 0,
+            "amount": amount,
+            "currency": "CNY",
+            "source": "eastmoney_etf",
+            "type": "etf",
+        }
+
+        # 获取基金净值信息（IOPV 实时参考净值 + 昨日净值）
+        fund_info = _eastmoney_fund_nav(symbol, market)
+        if fund_info:
+            result.update(fund_info)
+
+        return result
+    except Exception:
+        return None
+
+
+def _eastmoney_fund_nav(symbol, market="1"):
+    """从东方财富基金数据中心获取 ETF 净值信息。"""
+    # 获取基金基本信息（净值、溢价率等）
+    url = (
+        f"https://push2.eastmoney.com/api/qt/stock/get"
+        f"?secid={market}.{symbol}"
+        f"&fields=f43,f44,f45,f46,f47,f57,f58,f170,f171,f135,f136"
+    )
+
+    _em_limiter.wait()
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://quote.eastmoney.com",
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        data = json.loads(resp.read().decode("utf-8")).get("data", {})
+        if not data:
+            return {}
+
+        # f171 = 涨跌额, f135 = 市盈率, f136 = 市净率
+        pe = (data.get("f135", 0) or 0) / 100.0
+        pb = (data.get("f136", 0) or 0) / 100.0
+
+        result = {}
+        if pe:
+            result["pe"] = round(pe, 2)
+        if pb:
+            result["pb"] = round(pb, 2)
+
+        # 尝试获取基金净值（通过 fundgz 接口）
+        nav_info = _eastmoney_fund_detail(symbol)
+        if nav_info:
+            result.update(nav_info)
+
+        return result
+    except Exception:
+        return {}
+
+
+def _eastmoney_fund_detail(symbol):
+    """从东方财富基金详情接口获取 ETF 最新净值和估值。"""
+    # 获取基金详情（fundcode 格式为 6 位代码）
+    url = (
+        f"https://fundgz.1234567.com.cn/js/{symbol}.js"
+    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://fund.eastmoney.com/",
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        text = resp.read().decode("utf-8")
+        # 返回格式: jsonpgz({...})
+        m = re.search(r'jsonpgz\((.*?)\)', text)
+        if not m:
+            return {}
+        d = json.loads(m.group(1))
+
+        nav = float(d.get("dwjz", 0) or 0)         # 单位净值
+        gszzl = float(d.get("gszzl", 0) or 0)       # 估值涨跌幅
+        gztime = d.get("gztime", "")                  # 估值时间
+        jzrq = d.get("jzrq", "")                      # 净值日期
+        name = d.get("name", "")                       # 基金名称
+
+        result = {}
+        if nav:
+            result["nav"] = round(nav, 4)         # 单位净值（4 位小数）
+        if gszzl:
+            result["estimatedChangePercent"] = round(gszzl, 2)
+        if gztime:
+            result["estimateTime"] = gztime
+        if jzrq:
+            result["navDate"] = jzrq
+
+        # 计算溢价率需要交易价格（调用者已有 price，这里只返回净值）
+        return result
+    except Exception:
+        return {}
+
+
+def get_etf_info(symbol):
+    """获取 ETF 基金详细信息：跟踪指数、规模、费率等。"""
+    if not re.match(r"^\d{6}$", symbol):
+        return {}
+
+    url = (
+        f"https://fund.eastmoney.com/pingzhongdata/{symbol}.js"
+    )
+    req = urllib.request.Request(url, headers={
+        "User-Agent": "Mozilla/5.0",
+        "Referer": "https://fund.eastmoney.com/",
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=10)
+        text = resp.read().decode("utf-8")
+
+        info = {}
+        # 解析关键变量
+        # fS_name = "基金名称"
+        m = re.search(r'fS_name\s*=\s*"(.*?)"', text)
+        if m:
+            info["fundName"] = m.group(1)
+
+        # 跟踪指数
+        m = re.search(r'fS_code\s*=\s*"(.*?)"', text)
+        if m:
+            info["trackIndexCode"] = m.group(1)
+
+        # 基金规模（最新）
+        m = re.search(r'Data_currentFundManager\s*=\s*({.*?})', text, re.DOTALL)
+        # 规模通常在 Data_flown 数据中
+
+        # 管理费率、托管费率
+        m = re.search(r'Data_rate.*?=.*?\[(\d+\.\d+)', text)
+        if m:
+            info["managementFee"] = float(m.group(1))
+
+        return info
+    except Exception:
+        return {}
 
 
 def _f(parts, idx):
@@ -307,8 +512,29 @@ def _yf_history(symbol, period="1mo", interval="1d"):
 # ═══════════════════════════════════════════════════════════════
 
 def get_quote(symbol):
-    """获取报价：A股优先东方财富→Sina，美股优先 Sina→yfinance。"""
-    # A 股：优先东方财富（更稳定），Sina 备选
+    """获取报价：ETF 用 Sina+净值补充，A股优先东方财富→Sina，美股优先 Sina→yfinance。"""
+    # A 股 ETF：Sina 获取行情 + fundgz 补充净值/溢价率
+    if re.match(r"^\d{6}$", symbol) and is_etf_code(symbol):
+        q = sina_quote(symbol)
+        if q and q.get("price"):
+            q["source"] = "sina_etf"
+            q["type"] = "etf"
+            # 补充净值信息
+            nav_info = _eastmoney_fund_detail(symbol)
+            if nav_info:
+                q.update(nav_info)
+                # 计算溢价率
+                nav = nav_info.get("nav", 0)
+                price = q.get("price", 0)
+                if nav and price and nav > 0:
+                    q["premiumRate"] = round((price - nav) / nav * 100, 2)
+            return q
+        # 东方财富推送备选
+        q = eastmoney_etf_quote(symbol)
+        if q and q.get("price"):
+            return q
+
+    # A 股股票：优先东方财富（更稳定），Sina 备选
     if re.match(r"^\d{6}$", symbol):
         q = eastmoney_quote(symbol)
         if q and q.get("price"):
@@ -324,12 +550,13 @@ def get_quote(symbol):
     if q and q.get("price"):
         return q
 
-    # yfinance fallback
+    # yfinance fallback（也支持美股 ETF 如 SPY, QQQ 等）
     try:
         import yfinance as yf
         tk = yf.Ticker(symbol)
         info = tk.info or {}
-        return {
+        quote_type = info.get("quoteType", "")
+        result = {
             "symbol": info.get("symbol", symbol),
             "name": info.get("shortName") or info.get("longName") or "",
             "price": info.get("regularMarketPrice") or info.get("currentPrice") or 0,
@@ -343,15 +570,24 @@ def get_quote(symbol):
             "marketCap": info.get("marketCap") or 0,
             "currency": info.get("currency") or "USD",
         }
+        # 识别美股 ETF
+        if quote_type == "ETF":
+            result["type"] = "etf"
+            result["nav"] = info.get("navPrice") or 0
+            result["totalAssets"] = info.get("totalAssets") or 0
+            result["yield"] = info.get("yield") or 0
+            result["ytdReturn"] = info.get("ytdReturn") or 0
+        return result
     except Exception as e:
         return {"error": str(e), "symbol": symbol}
 
 
 def _eastmoney_history(symbol, limit=60):
-    """从东方财富获取 A 股历史 K 线（更稳定的数据源）。"""
+    """从东方财富获取 A 股/ETF 历史 K 线（更稳定的数据源）。"""
     if not re.match(r"^\d{6}$", symbol):
         return []
-    market = "1" if symbol.startswith(("6", "9")) else "0"
+    # ETF 和股票共用同一 K 线接口，只需正确识别市场
+    market = "1" if symbol.startswith(("6", "9", "5", "50", "56", "58")) else "0"
     url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={market}.{symbol}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20260603&lmt={limit}"
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0",
@@ -410,8 +646,8 @@ def _sina_history(symbol, datalen=60):
 
 
 def get_history(symbol, period="1mo", interval="1d"):
-    """获取历史 K 线：A 股用东方财富→Sina，美股用 yfinance。"""
-    # A 股：优先东方财富，Sina 备选
+    """获取历史 K 线：A 股/ETF 用东方财富→Sina，美股用 yfinance。"""
+    # A 股 / ETF：优先东方财富，Sina 备选
     if re.match(r"^\d{6}$", symbol):
         limit = {"1mo": 20, "3mo": 60, "6mo": 120, "1y": 250}.get(period, 60)
         bars = _eastmoney_history(symbol, limit)
@@ -422,7 +658,7 @@ def get_history(symbol, period="1mo", interval="1d"):
         if bars:
             return bars
 
-    # 美股：yfinance
+    # 美股 / 美股 ETF：yfinance
     return _yf_history(symbol, period, interval)
 
 
@@ -506,8 +742,8 @@ def get_fundamentals(symbol):
         return {"error": str(e)}
 
 
-def get_full(symbol):
-    """全量分析：报价 + 技术指标 + 基本面（A 股）。"""
+def _compute_indicators(quote, d1m, d3m, d1y):
+    """根据报价和多周期 K 线计算技术指标（股票和 ETF 通用）。"""
     quote = get_quote(symbol)
     if "error" in quote:
         return quote
@@ -611,6 +847,77 @@ def get_full(symbol):
             round(pmax if pmax != float("-inf") else last_p * 1.05, 2),
         ]
 
+    p1m = [b["close"] for b in d1m]
+    p3m = [b["close"] for b in d3m]
+    p1y = [b["close"] for b in d1y]
+
+    def _sma(p, n):
+        return round(sum(p[-n:]) / n, 2) if len(p) >= n else (p[-1] if p else 0)
+
+    def _rsi(p, n=14):
+        if len(p) < n + 1:
+            return 50
+        gains = losses = 0
+        for i in range(-n, 0):
+            d = p[i] - p[i - 1]
+            if d > 0:
+                gains += d
+            else:
+                losses -= d
+        gains /= n
+        losses /= n
+        return 100 if losses == 0 else round(100 - 100 / (1 + gains / losses), 2)
+
+    def _macd(p):
+        if len(p) < 35:
+            return {"macdLine": 0, "signalLine": 0, "histogram": 0}
+        work = p[-40:] if len(p) > 40 else p
+        k12, k26, k9 = 2 / 13, 2 / 27, 2 / 10
+        e12 = sum(work[:12]) / 12 if len(work) >= 12 else sum(work) / len(work)
+        e26 = sum(work[:26]) / 26 if len(work) >= 26 else sum(work) / len(work)
+        macd_series = []
+        for idx, v in enumerate(work):
+            if idx >= 12:
+                e12 = (v - e12) * k12 + e12
+            if idx >= 26:
+                e26 = (v - e26) * k26 + e26
+            if idx >= 26:
+                macd_series.append(e12 - e26)
+        if not macd_series:
+            return {"macdLine": 0, "signalLine": 0, "histogram": 0}
+        macd_line = macd_series[-1]
+        signal = sum(macd_series[:9]) / 9 if len(macd_series) >= 9 else macd_series[-1]
+        for v in macd_series:
+            signal = (v - signal) * k9 + signal
+        return {
+            "macdLine": round(macd_line, 2),
+            "signalLine": round(signal, 2),
+            "histogram": round(macd_line - signal, 2),
+        }
+
+    def _volatility(p, n=20):
+        if len(p) < n + 1:
+            return 0
+        returns = [(p[i + 1] - p[i]) / p[i] for i in range(-n, 0)]
+        mean = sum(returns) / n
+        var = sum((r - mean) ** 2 for r in returns) / n
+        return round(math.sqrt(var) * math.sqrt(252) * 100, 2)
+
+    def _sr(p, look=10):
+        pmin, pmax = float("inf"), float("-inf")
+        for i in range(look, len(p) - look):
+            is_min = all(p[j] >= p[i] for j in range(i - look, i + look + 1) if 0 <= j < len(p))
+            is_max = all(p[j] <= p[i] for j in range(i - look, i + look + 1) if 0 <= j < len(p))
+            if is_min:
+                pmin = min(pmin, p[i])
+            if is_max:
+                pmax = max(pmax, p[i])
+        last_p = p[-1]
+        return [
+            round(pmin if pmin != float("inf") else last_p * 0.95, 2),
+            round(pmax if pmax != float("-inf") else last_p * 1.05, 2),
+        ]
+
     cur_price = quote.get("price", 0)
     ind = {}
     ind["dailyChange"] = round(quote.get("changePercent", 0), 2)
@@ -634,6 +941,26 @@ def get_full(symbol):
     if len(p3m) >= 60:
         ind["change_60d"] = round((cur_price - p3m[0]) / p3m[0] * 100, 2)
 
+    return ind
+
+
+def get_full(symbol):
+    """全量分析：报价 + 技术指标 + 基本面（A 股股票）。"""
+    quote = get_quote(symbol)
+    if "error" in quote:
+        return quote
+
+    # 基本面（A 股）
+    fundamentals = get_fundamentals(symbol)
+
+    # 多周期 K 线
+    d1m = get_history(symbol, "1mo", "1d")
+    d3m = get_history(symbol, "3mo", "1d")
+    d1y = get_history(symbol, "1y", "1d")
+
+    # 计算技术指标
+    ind = _compute_indicators(quote, d1m, d3m, d1y)
+
     # 最近 K 线（最多 20 条）
     kline = d1m[-20:] if len(d1m) > 20 else d1m
 
@@ -645,13 +972,70 @@ def get_full(symbol):
     }
 
 
+def get_etf_full(symbol):
+    """ETF 全量分析：报价 + 净值/溢价率 + 技术指标 + 资金流向。"""
+    quote = get_quote(symbol)
+    if "error" in quote:
+        return quote
+
+    # ETF 基金信息（跟踪指数、规模等）
+    etf_info = get_etf_info(symbol)
+
+    # 计算溢价率
+    nav = quote.get("nav", 0)
+    price = quote.get("price", 0)
+    premium_rate = round((price - nav) / nav * 100, 2) if nav and nav > 0 else None
+
+    # 多周期 K 线
+    d1m = get_history(symbol, "1mo", "1d")
+    d3m = get_history(symbol, "3mo", "1d")
+    d1y = get_history(symbol, "1y", "1d")
+
+    # 计算技术指标（复用通用函数）
+    ind = _compute_indicators(quote, d1m, d3m, d1y)
+
+    # ETF 专用指标：溢价率
+    if premium_rate is not None:
+        ind["premiumRate"] = premium_rate
+
+    # 最近 K 线（最多 20 条）
+    kline = d1m[-20:] if len(d1m) > 20 else d1m
+
+    result = {
+        "quote": quote,
+        "indicators": ind,
+        "etfInfo": etf_info if etf_info else None,
+        "marketData": {"dailyKline": kline, "dataSource": "sina+eastmoney_etf"},
+    }
+
+    # 美股 ETF 补充 yfinance 信息
+    if not re.match(r"^\d{6}$", symbol):
+        try:
+            import yfinance as yf
+            tk = yf.Ticker(symbol)
+            info = tk.info or {}
+            result["etfInfo"] = {
+                "fundName": info.get("longName", ""),
+                "totalAssets": info.get("totalAssets", 0),
+                "yield": info.get("yield", 0),
+                "ytdReturn": info.get("ytdReturn", 0),
+                "annualReportExpenseRatio": info.get("annualReportExpenseRatio", 0),
+                "navPrice": info.get("navPrice", 0),
+                "previousClose": info.get("previousClose", 0),
+            }
+        except Exception:
+            pass
+
+    return result
+
+
 # ═══════════════════════════════════════════════════════════════
 #  入口
 # ═══════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     if len(sys.argv) < 3:
-        print(json.dumps({"error": "用法: yfinance_data.py <quote|history|full> <symbol> [args...]"}))
+        print(json.dumps({"error": "用法: yfinance_data.py <quote|history|full|etf-full> <symbol> [args...]"}))
         sys.exit(1)
 
     cmd, symbol = sys.argv[1], sys.argv[2]
@@ -665,6 +1049,8 @@ if __name__ == "__main__":
             data = get_history(symbol, period, interval)
         elif cmd == "full":
             data = get_full(symbol)
+        elif cmd == "etf-full":
+            data = get_etf_full(symbol)
         else:
             data = {"error": f"未知命令: {cmd}"}
 

@@ -1,7 +1,8 @@
-# A 股数据采集 — 每日操作说明
+# A 股 + ETF 数据采集 — 每日操作说明
 
 > 每个交易日收盘后运行，采集全市场数据用于行情分析和时序模型训练。
-> 采集完成约需 **10 秒**，总数据量 **~200KB/天**。
+> 采集完成约需 **15 秒**，总数据量 **~250KB/天**。
+> 含个股 + ETF 数据，ETF 额外提供净值和溢价率。
 
 ---
 
@@ -14,6 +15,11 @@ crontab -e
 
 # 添加一行（注意替换为你的实际路径）：
 30 15 * * 1-5 cd /Users/sunjiakai/localProject/AIDev/AIDev/ingestion-pipeline && python3 batch_collect.py >> collect.log 2>&1
+```
+
+**跳过 ETF**：如仅需股票数据，加 `--no-etf`：
+```bash
+python3 batch_collect.py --no-etf
 ```
 
 **解释**：
@@ -93,12 +99,15 @@ python3 batch_collect.py --update-list
 ~/localProject/AIDev/AIDev/ingestion-pipeline/market_data/
 ├── meta/                              ← 元数据（不用管，自动维护）
 │   ├── stocks_list.json               ← A 股清单（5488 只）
+│   ├── etf_list.json                  ← ETF 清单（~1000 只）
 │   ├── industry_map.json              ← 行业映射（增量累积）
 │   └── history_index.json             ← 采集历史索引
 ├── 20260603/                          ← 每天一个目录
 │   ├── snapshot.json.gz               ← 全市场快照（~170KB gzip）
+│   ├── etf_snapshot.json.gz           ← ETF 快照+净值（~30KB gzip）
 │   ├── indices.json                   ← 大盘指数（7 个）
 │   ├── market_stats.json              ← 涨跌统计
+│   ├── etf_stats.json                 ← ETF 统计（净值/溢价率/TOP ETF）
 │   ├── sectors.json                   ← 行业板块排行
 │   ├── top_stocks.json                ← TOP 榜单
 │   └── training.json                  ← 汇总训练样本
@@ -112,10 +121,10 @@ python3 batch_collect.py --update-list
 
 | 时间 | 数据量 |
 |------|--------|
-| 每天 | ~200 KB |
-| 一个月（~22 个交易日） | ~4.4 MB |
-| 一年（~250 个交易日） | ~50 MB |
-| 十年 | ~500 MB |
+| 每天 | ~250 KB |
+| 一个月（~22 个交易日） | ~5.5 MB |
+| 一年（~250 个交易日） | ~62 MB |
+| 十年 | ~620 MB |
 
 **无需手动清理。** 如果需要可以删除历史数据：
 
@@ -149,7 +158,43 @@ python3 batch_collect.py
 
 ---
 
-## 六、注意事项
+## 六、单独查询 ETF
+
+除了批量采集，也可用 `yfinance_data.py` 单独查询 ETF：
+
+```bash
+# A 股 ETF 报价（510050 = 上证50ETF）
+python3 yfinance_data.py quote 510050
+
+# A 股 ETF 历史 K 线
+python3 yfinance_data.py history 510050 1mo 1d
+
+# A 股 ETF 全量分析（含净值、溢价率、技术指标）
+python3 yfinance_data.py etf-full 510050
+
+# 美股 ETF 全量分析（SPY = 标普500 ETF）
+python3 yfinance_data.py etf-full SPY
+```
+
+**A 股 ETF 代码规则**：
+- 上海 ETF：510xxx-519xxx, 560xxx-569xxx, 580xxx-589xxx
+- 深圳 ETF：159xxx
+- 深圳 LOF：150xxx, 164xxx-166xxx
+- 上海 LOF：501xxx-502xxx
+
+**常用 A 股 ETF**：
+| 代码 | 名称 | 跟踪指数 |
+|------|------|----------|
+| 510050 | 上证50ETF | 上证50 |
+| 510300 | 沪深300ETF | 沪深300 |
+| 510500 | 中证500ETF | 中证500 |
+| 159919 | 沪深300ETF | 沪深300 |
+| 159901 | 深100ETF | 深证100 |
+| 588000 | 科创50ETF | 科创50 |
+
+---
+
+## 七、注意事项
 
 | 场景 | 说明 |
 |------|------|
@@ -158,4 +203,6 @@ python3 batch_collect.py
 | **行业映射不全** | 首次只映射了部分股票，行业板块会随着每次使用逐步覆盖。不影响其他数据 |
 | **跨天数据** | 每天第一次运行会创建新目录，不会覆盖之前的数据 |
 | **股票清单更新** | 每 30 天自动刷新，IPO 新股会自动加入 |
-| **东方财富限流** | 行业映射使用东方财富 API（30 次/分），批量采集不影响 |
+| **ETF 净值** | 部分新发 ETF 可能无净值数据（东方财富基金估值接口延迟），不影响行情数据 |
+| **ETF 代码** | 首次运行会自动发现 ETF 代码（~20 秒），30 天缓存 |
+| **溢价率** | 交易价格与基金净值的偏离，正值=溢价（买贵了），负值=折价（买便宜了） |

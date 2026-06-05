@@ -175,6 +175,142 @@ def is_etf_code(symbol):
     return False
 
 
+# ── 实时大盘指数 ───────────────────────────────
+
+# 主要指数代码 → Sina 代码
+_MAJOR_INDICES = {
+    "sh000001": "上证指数",
+    "sz399001": "深证成指",
+    "sz399006": "创业板指",
+    "sh000688": "科创50",
+    "sh000300": "沪深300",
+    "sh000905": "中证500",
+    "sh000852": "中证1000",
+}
+
+
+def sina_realtime_indices():
+    """从 Sina 获取主要指数的实时行情（T+0），用于补充分析上下文。"""
+    codes = ",".join(_MAJOR_INDICES.keys())
+    url = f"https://hq.sinajs.cn/list={codes}"
+    req = urllib.request.Request(url, headers={
+        "Referer": "https://finance.sina.com.cn",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=8)
+        text = resp.read().decode("gbk")
+    except Exception:
+        return {}
+
+    result = {}
+    for line in text.strip().split("\n"):
+        m = re.search(r'hq_str_(\w+)="(.+)"', line)
+        if not m:
+            continue
+        code = m.group(1)
+        content = m.group(2)
+        parts = content.split(",")
+        if len(parts) < 4:
+            continue
+        name = parts[0]
+        prev_close = _f(parts, 2)
+        current = _f(parts, 3)
+        high = _f(parts, 4) if len(parts) > 4 else 0
+        low = _f(parts, 5) if len(parts) > 5 else 0
+        change = round(current - prev_close, 2) if current and prev_close else 0
+        change_pct = round(change / prev_close * 100, 2) if prev_close and prev_close != 0 else 0
+        result[code] = {
+            "name": name,
+            "price": current,
+            "change": change,
+            "changePercent": change_pct,
+            "prevClose": prev_close,
+            "high": high,
+            "low": low,
+        }
+    return result
+
+
+# ── 实时行业板块（新浪财经）─────────────────
+
+def sina_realtime_sectors():
+    """从新浪财经获取行业板块实时涨跌（T+0），替代 training.json 中的 T-1 板块数据。
+
+    返回: dict，包含 topSectors / bottomSectors / totalSectors
+    """
+    url = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
+    req = urllib.request.Request(url, headers={
+        "Referer": "https://finance.sina.com.cn",
+        "User-Agent": "Mozilla/5.0",
+    })
+    try:
+        resp = urllib.request.urlopen(req, timeout=8)
+        text = resp.read().decode("gbk")
+    except Exception:
+        return {}
+
+    m = re.search(r'=\s*(\{.*\})', text)
+    if not m:
+        return {}
+
+    try:
+        data = json.loads(m.group(1))
+    except Exception:
+        return {}
+
+    sectors = []
+    for k, v in data.items():
+        parts = v.split(",")
+        if len(parts) < 6:
+            continue
+        try:
+            chg_pct = float(parts[5])
+            count = int(parts[2]) if parts[2].isdigit() else 0
+        except (ValueError, IndexError):
+            continue
+        sec = {
+            "name": parts[1],
+            "stockCount": count,
+            "changePercent": round(chg_pct, 2),
+        }
+        # 领涨股
+        if len(parts) >= 12:
+            try:
+                sec["leadStock"] = parts[11]
+                sec["leadStockCode"] = parts[8]
+                sec["leadStockChange"] = float(parts[10])
+            except (ValueError, IndexError):
+                pass
+        sectors.append(sec)
+
+    sectors.sort(key=lambda x: x.get("changePercent", 0), reverse=True)
+
+    # 汇总板块涨跌统计（行业板块互斥，可反映市场宽度）
+    up_count = sum(1 for s in sectors if s["changePercent"] > 0)
+    down_count = sum(1 for s in sectors if s["changePercent"] < 0)
+    flat_count = sum(1 for s in sectors if s["changePercent"] == 0)
+    # 按板块股票数加权统计（更接近实际涨跌家数）
+    up_stocks = sum(s["stockCount"] for s in sectors if s["changePercent"] > 0)
+    down_stocks = sum(s["stockCount"] for s in sectors if s["changePercent"] < 0)
+    all_stocks = sum(s["stockCount"] for s in sectors)
+
+    return {
+        "topSectors": sectors[:20],
+        "bottomSectors": sectors[-20:] if len(sectors) >= 20 else sectors[len(sectors)//2:],
+        "totalSectors": len(sectors),
+        "marketBreadth": {
+            "upSectors": up_count,
+            "downSectors": down_count,
+            "flatSectors": flat_count,
+            "upStocks": up_stocks,
+            "downStocks": down_stocks,
+            "totalStocks": all_stocks,
+            "note": "板块涨跌为实时(T+0)，个股数为板块成分股合计(有少量交叉)",
+        },
+    }
+
+
 def _to_sina_symbol(symbol):
     """转换用户输入的符号为新浪格式。"""
     s = symbol.upper().strip()
@@ -383,21 +519,23 @@ def _eastmoney_fund_detail(symbol):
             return {}
         d = json.loads(m.group(1))
 
-        nav = float(d.get("dwjz", 0) or 0)         # 单位净值
+        dwjz = float(d.get("dwjz", 0) or 0)       # 单位净值（昨日确认）
+        gsz = float(d.get("gsz", 0) or 0)          # 盘中实时估值
         gszzl = float(d.get("gszzl", 0) or 0)       # 估值涨跌幅
         gztime = d.get("gztime", "")                  # 估值时间
         jzrq = d.get("jzrq", "")                      # 净值日期
         name = d.get("name", "")                       # 基金名称
 
         result = {}
-        if nav:
-            result["nav"] = round(nav, 4)         # 单位净值（4 位小数）
+        if dwjz:
+            result["nav"] = round(dwjz, 4)         # 昨日确认净值（4 位小数）
+            result["navDate"] = jzrq               # 净值日期
+        if gsz:
+            result["navRealtime"] = round(gsz, 4)   # 盘中实时估值
         if gszzl:
-            result["estimatedChangePercent"] = round(gszzl, 2)
+            result["navChangePercent"] = round(gszzl, 2)  # 净值估值涨跌幅
         if gztime:
             result["estimateTime"] = gztime
-        if jzrq:
-            result["navDate"] = jzrq
 
         # 计算溢价率需要交易价格（调用者已有 price，这里只返回净值）
         return result
@@ -406,7 +544,7 @@ def _eastmoney_fund_detail(symbol):
 
 
 def get_etf_info(symbol):
-    """获取 ETF 基金详细信息：跟踪指数、规模、费率等。"""
+    """获取 ETF 基金详细信息：跟踪指数、规模等。"""
     if not re.match(r"^\d{6}$", symbol):
         return {}
 
@@ -433,14 +571,9 @@ def get_etf_info(symbol):
         if m:
             info["trackIndexCode"] = m.group(1)
 
-        # 基金规模（最新）
-        m = re.search(r'Data_currentFundManager\s*=\s*({.*?})', text, re.DOTALL)
-        # 规模通常在 Data_flown 数据中
-
-        # 管理费率、托管费率
-        m = re.search(r'Data_rate.*?=.*?\[(\d+\.\d+)', text)
-        if m:
-            info["managementFee"] = float(m.group(1))
+        # 注：pingzhongdata 接口中 fund_sourceRate/fund_Rate 为空，
+        # Data_rateInSimilarPersent 是同类排名百分比而非管理费率，
+        # 曾因正则误匹配导致显示15.23%（实际是机构持有比例），已移除。
 
         return info
     except Exception:
@@ -523,11 +656,16 @@ def get_quote(symbol):
             nav_info = _eastmoney_fund_detail(symbol)
             if nav_info:
                 q.update(nav_info)
-                # 计算溢价率
-                nav = nav_info.get("nav", 0)
+                # 计算溢价率：优先用盘中实时估值(gsz)，盘后用确认净值(dwjz)
+                nav_for_premium = nav_info.get("navRealtime") or nav_info.get("nav", 0)
                 price = q.get("price", 0)
-                if nav and price and nav > 0:
-                    q["premiumRate"] = round((price - nav) / nav * 100, 2)
+                if nav_for_premium and price and nav_for_premium > 0:
+                    q["premiumRate"] = round((price - nav_for_premium) / nav_for_premium * 100, 2)
+                    # 标记溢价率使用的净值类型
+                    if nav_info.get("navRealtime"):
+                        q["premiumBasedOn"] = "realtime_estimate"   # 基于盘中估值
+                    else:
+                        q["premiumBasedOn"] = "confirmed_nav"         # 基于确认净值
             return q
         # 东方财富推送备选
         q = eastmoney_etf_quote(symbol)
@@ -583,12 +721,17 @@ def get_quote(symbol):
 
 
 def _eastmoney_history(symbol, limit=60):
-    """从东方财富获取 A 股/ETF 历史 K 线（更稳定的数据源）。"""
+    """从东方财富获取 A 股/ETF 历史 K 线（不复权，与行情软件 MACD 计算一致）。"""
     if not re.match(r"^\d{6}$", symbol):
         return []
     # ETF 和股票共用同一 K 线接口，只需正确识别市场
     market = "1" if symbol.startswith(("6", "9", "5", "50", "56", "58")) else "0"
-    url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={market}.{symbol}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end=20260603&lmt={limit}"
+    # fqt=1 前复权 —— 中国行情软件（通达信/同花顺）MACD 默认使用前复权数据
+    # 不复权数据会在除权日产生虚假跳空，导致 MACD 信号失真
+    # end 用当前日期，确保获取到最新数据
+    from datetime import date as _date
+    end_date = _date.today().strftime("%Y%m%d")
+    url = f"https://push2his.eastmoney.com/api/qt/stock/kline/get?secid={market}.{symbol}&fields1=f1,f2,f3&fields2=f51,f52,f53,f54,f55,f56,f57&klt=101&fqt=1&end={end_date}&lmt={limit}"
     req = urllib.request.Request(url, headers={
         "User-Agent": "Mozilla/5.0",
         "Referer": "https://quote.eastmoney.com",
@@ -743,113 +886,25 @@ def get_fundamentals(symbol):
 
 
 def _compute_indicators(quote, d1m, d3m, d1y):
-    """根据报价和多周期 K 线计算技术指标（股票和 ETF 通用）。"""
-    quote = get_quote(symbol)
-    if "error" in quote:
-        return quote
+    """根据报价和多周期 K 线计算技术指标（股票和 ETF 通用）。
 
-    # 基本面（A 股）
-    fundamentals = get_fundamentals(symbol)
+    关键修正：将当日实时价格追加到 K 线末尾，
+    确保技术指标（尤其 MACD）与行情软件一致。
+    """
+    # 多周期 K 线（使用传入参数，避免重复 API 调用）
+    p1m = [b["close"] for b in d1m] if d1m else []
+    p3m = [b["close"] for b in d3m] if d3m else []
+    p1y = [b["close"] for b in d1y] if d1y else []
 
-    # 多周期 K 线
-    d1m = get_history(symbol, "1mo", "1d")
-    d3m = get_history(symbol, "3mo", "1d")
-    d1y = get_history(symbol, "1y", "1d")
-
-    p1m = [b["close"] for b in d1m]
-    p3m = [b["close"] for b in d3m]
-    p1y = [b["close"] for b in d1y]
-
-    def _sma(p, n):
-        return round(sum(p[-n:]) / n, 2) if len(p) >= n else (p[-1] if p else 0)
-
-    def _rsi(p, n=14):
-        if len(p) < n + 1:
-            return 50
-        gains = losses = 0
-        for i in range(-n, 0):
-            d = p[i] - p[i - 1]
-            if d > 0:
-                gains += d
-            else:
-                losses -= d
-        gains /= n
-        losses /= n
-        return 100 if losses == 0 else round(100 - 100 / (1 + gains / losses), 2)
-
-    def _ema(p, n):
-        """计算指定长度的 EMA 序列。"""
-        if len(p) < n:
-            return p[-1]
-        k = 2 / (n + 1)
-        ema = sum(p[-n:]) / n  # SMA 初始化
-        for v in p[-(n - 1):]:
-            ema = (v - ema) * k + ema
-        return ema
-
-    def _macd(p):
-        if len(p) < 35:
-            return {"macdLine": 0, "signalLine": 0, "histogram": 0}
-        # 计算 EMA12 和 EMA26 的历史序列（取最近 40 个交易日）
-        work = p[-40:] if len(p) > 40 else p
-        k12, k26, k9 = 2 / 13, 2 / 27, 2 / 10
-
-        # 初始化 EMA 用 SMA
-        e12 = sum(work[:12]) / 12 if len(work) >= 12 else sum(work) / len(work)
-        e26 = sum(work[:26]) / 26 if len(work) >= 26 else sum(work) / len(work)
-
-        # 遍历计算 EMA
-        macd_series = []
-        for idx, v in enumerate(work):
-            if idx >= 12:
-                e12 = (v - e12) * k12 + e12
-            if idx >= 26:
-                e26 = (v - e26) * k26 + e26
-            if idx >= 26:
-                macd_series.append(e12 - e26)
-
-        if not macd_series:
-            return {"macdLine": 0, "signalLine": 0, "histogram": 0}
-
-        macd_line = macd_series[-1]
-
-        # 信号线 = 对 MACD 序列做 EMA9
-        signal = sum(macd_series[:9]) / 9 if len(macd_series) >= 9 else macd_series[-1]
-        for v in macd_series:
-            signal = (v - signal) * k9 + signal
-
-        return {
-            "macdLine": round(macd_line, 2),
-            "signalLine": round(signal, 2),
-            "histogram": round(macd_line - signal, 2),
-        }
-
-    def _volatility(p, n=20):
-        if len(p) < n + 1:
-            return 0
-        returns = [(p[i + 1] - p[i]) / p[i] for i in range(-n, 0)]
-        mean = sum(returns) / n
-        var = sum((r - mean) ** 2 for r in returns) / n
-        return round(math.sqrt(var) * math.sqrt(252) * 100, 2)
-
-    def _sr(p, look=10):
-        pmin, pmax = float("inf"), float("-inf")
-        for i in range(look, len(p) - look):
-            is_min = all(p[j] >= p[i] for j in range(i - look, i + look + 1) if 0 <= j < len(p))
-            is_max = all(p[j] <= p[i] for j in range(i - look, i + look + 1) if 0 <= j < len(p))
-            if is_min:
-                pmin = min(pmin, p[i])
-            if is_max:
-                pmax = max(pmax, p[i])
-        last_p = p[-1]
-        return [
-            round(pmin if pmin != float("inf") else last_p * 0.95, 2),
-            round(pmax if pmax != float("-inf") else last_p * 1.05, 2),
-        ]
-
-    p1m = [b["close"] for b in d1m]
-    p3m = [b["close"] for b in d3m]
-    p1y = [b["close"] for b in d1y]
+    # 将当日实时价格追加到 K 线末尾（与行情软件行为一致）
+    # 历史 K 线不含当日未收盘的 K 线，而行情软件的 MACD 包含当日实时价
+    cur_price = quote.get("price", 0) if quote else 0
+    if cur_price and p1y and p1y[-1] != cur_price:
+        p1y.append(cur_price)
+    if cur_price and p3m and p3m[-1] != cur_price:
+        p3m.append(cur_price)
+    if cur_price and p1m and p1m[-1] != cur_price:
+        p1m.append(cur_price)
 
     def _sma(p, n):
         return round(sum(p[-n:]) / n, 2) if len(p) >= n else (p[-1] if p else 0)
@@ -869,12 +924,23 @@ def _compute_indicators(quote, d1m, d3m, d1y):
         return 100 if losses == 0 else round(100 - 100 / (1 + gains / losses), 2)
 
     def _macd(p):
+        """计算 MACD：DIF=EMA12-EMA26, DEA=EMA9(DIF), MACD柱=DIF-DEA。
+
+        关键：使用全部可用数据（不截断），确保 EMA 充分收敛。
+        行情软件通常用 200+ 根 K 线计算 MACD，40 根远远不够。
+        """
         if len(p) < 35:
             return {"macdLine": 0, "signalLine": 0, "histogram": 0}
-        work = p[-40:] if len(p) > 40 else p
+        # 使用全部数据，不截断 —— EMA 需要足够长的历史才能收敛到真实值
+        work = p
         k12, k26, k9 = 2 / 13, 2 / 27, 2 / 10
+
+        # EMA12 初始化：用前 12 根的 SMA
         e12 = sum(work[:12]) / 12 if len(work) >= 12 else sum(work) / len(work)
+        # EMA26 初始化：用前 26 根的 SMA
         e26 = sum(work[:26]) / 26 if len(work) >= 26 else sum(work) / len(work)
+
+        # 遍历计算 EMA12 和 EMA26
         macd_series = []
         for idx, v in enumerate(work):
             if idx >= 12:
@@ -883,16 +949,25 @@ def _compute_indicators(quote, d1m, d3m, d1y):
                 e26 = (v - e26) * k26 + e26
             if idx >= 26:
                 macd_series.append(e12 - e26)
+
         if not macd_series:
             return {"macdLine": 0, "signalLine": 0, "histogram": 0}
+
         macd_line = macd_series[-1]
-        signal = sum(macd_series[:9]) / 9 if len(macd_series) >= 9 else macd_series[-1]
-        for v in macd_series:
-            signal = (v - signal) * k9 + signal
+
+        # 信号线 DEA = EMA9(DIF)
+        # 正确做法：前 9 个 DIF 做 SMA 初始化，从第 10 个开始做 EMA 迭代
+        if len(macd_series) >= 9:
+            signal = sum(macd_series[:9]) / 9
+            for v in macd_series[9:]:
+                signal = (v - signal) * k9 + signal
+        else:
+            signal = macd_series[-1]
+
         return {
-            "macdLine": round(macd_line, 2),
-            "signalLine": round(signal, 2),
-            "histogram": round(macd_line - signal, 2),
+            "macdLine": round(macd_line, 3),
+            "signalLine": round(signal, 3),
+            "histogram": round(macd_line - signal, 3),
         }
 
     def _volatility(p, n=20):
@@ -969,6 +1044,8 @@ def get_full(symbol):
         "indicators": ind,
         "fundamentals": fundamentals if fundamentals else None,
         "marketData": {"dailyKline": kline, "dataSource": "sina+yfinance+eastmoney"},
+        "realtimeIndices": sina_realtime_indices(),
+        "realtimeSectors": sina_realtime_sectors(),
     }
 
 
@@ -981,10 +1058,14 @@ def get_etf_full(symbol):
     # ETF 基金信息（跟踪指数、规模等）
     etf_info = get_etf_info(symbol)
 
-    # 计算溢价率
-    nav = quote.get("nav", 0)
+    # 计算溢价率：优先用盘中实时估值(gsz)，盘后用确认净值(dwjz)
+    # 与 get_quote() 保持一致的逻辑，避免 T-1 净值导致溢价率偏差
+    nav_realtime = quote.get("navRealtime", 0)
+    nav_confirmed = quote.get("nav", 0)
+    nav_for_premium = nav_realtime or nav_confirmed
     price = quote.get("price", 0)
-    premium_rate = round((price - nav) / nav * 100, 2) if nav and nav > 0 else None
+    premium_rate = round((price - nav_for_premium) / nav_for_premium * 100, 2) if nav_for_premium and nav_for_premium > 0 else None
+    premium_based_on = "realtime_estimate" if nav_realtime else "confirmed_nav"
 
     # 多周期 K 线
     d1m = get_history(symbol, "1mo", "1d")
@@ -994,9 +1075,10 @@ def get_etf_full(symbol):
     # 计算技术指标（复用通用函数）
     ind = _compute_indicators(quote, d1m, d3m, d1y)
 
-    # ETF 专用指标：溢价率
+    # ETF 专用指标：溢价率（与 quote 中的 premiumRate 一致）
     if premium_rate is not None:
         ind["premiumRate"] = premium_rate
+        ind["premiumBasedOn"] = premium_based_on
 
     # 最近 K 线（最多 20 条）
     kline = d1m[-20:] if len(d1m) > 20 else d1m
@@ -1006,6 +1088,8 @@ def get_etf_full(symbol):
         "indicators": ind,
         "etfInfo": etf_info if etf_info else None,
         "marketData": {"dailyKline": kline, "dataSource": "sina+eastmoney_etf"},
+        "realtimeIndices": sina_realtime_indices(),
+        "realtimeSectors": sina_realtime_sectors(),
     }
 
     # 美股 ETF 补充 yfinance 信息

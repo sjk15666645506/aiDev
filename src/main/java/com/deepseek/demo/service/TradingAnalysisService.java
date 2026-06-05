@@ -158,18 +158,81 @@ public class TradingAnalysisService {
         StringBuilder sb = new StringBuilder();
 
         // ══════════════════════════════════════════
-        //  大盘背景（从 batch_collect 采集数据注入）
+        //  实时大盘指数（T+0，与个股数据同一时刻）
         // ══════════════════════════════════════════
-        String marketOverview = marketDataService.getMarketOverview();
+        @SuppressWarnings("unchecked")
+        Map<String, Object> realtimeIndices = (Map<String, Object>) analysis.get("realtimeIndices");
+        if (realtimeIndices != null && !realtimeIndices.isEmpty()) {
+            sb.append("## 实时大盘指数（今日实时 T+0）\n");
+            for (Map.Entry<String, Object> e : realtimeIndices.entrySet()) {
+                Map<String, Object> idx = (Map<String, Object>) e.getValue();
+                if (idx != null) {
+                    sb.append(String.format("- %s: %.2f (%+.2f%%)\n",
+                            idx.get("name"), toDouble(idx.get("price")), toDouble(idx.get("changePercent"))));
+                }
+            }
+            sb.append("\n");
+        }
+
+        // ══════════════════════════════════════════
+        //  实时行业板块（T+0）
+        // ══════════════════════════════════════════
+        @SuppressWarnings("unchecked")
+        Map<String, Object> realtimeSectors = (Map<String, Object>) analysis.get("realtimeSectors");
+        if (realtimeSectors != null && !realtimeSectors.isEmpty()) {
+            sb.append("## 实时行业板块（今日实时 T+0）\n");
+            List<Map<String, Object>> topSectors = (List<Map<String, Object>>) realtimeSectors.get("topSectors");
+            if (topSectors != null && !topSectors.isEmpty()) {
+                sb.append("涨幅居前: ");
+                for (int i = 0; i < Math.min(5, topSectors.size()); i++) {
+                    Map<String, Object> sec = topSectors.get(i);
+                    sb.append(String.format("%s(%+.2f%%) ", sec.get("name"), toDouble(sec.get("changePercent"))));
+                }
+                sb.append("\n");
+            }
+            List<Map<String, Object>> bottomSectors = (List<Map<String, Object>>) realtimeSectors.get("bottomSectors");
+            if (bottomSectors != null && !bottomSectors.isEmpty()) {
+                sb.append("跌幅居前: ");
+                for (int i = 0; i < Math.min(5, bottomSectors.size()); i++) {
+                    Map<String, Object> sec = bottomSectors.get(i);
+                    sb.append(String.format("%s(%+.2f%%) ", sec.get("name"), toDouble(sec.get("changePercent"))));
+                }
+                sb.append("\n");
+            }
+            sb.append("\n");
+        }
+
+        // 实时市场宽度（板块涨跌统计）
+        if (realtimeSectors != null) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> breadth = (Map<String, Object>) realtimeSectors.get("marketBreadth");
+            if (breadth != null && !breadth.isEmpty()) {
+                sb.append("## 实时市场宽度（今日 T+0）\n");
+                int upSec = toInt(breadth.get("upSectors"));
+                int downSec = toInt(breadth.get("downSectors"));
+                int totalSec = toInt(breadth.get("totalSectors"));
+                sb.append(String.format("- 行业板块: %d涨 %d跌 (共%d个)\n", upSec, downSec, totalSec));
+                int upStk = toInt(breadth.get("upStocks"));
+                int downStk = toInt(breadth.get("downStocks"));
+                int totalStk = toInt(breadth.get("totalStocks"));
+                sb.append(String.format("- 板块内个股: 约%d涨 约%d跌 (共约%d只)\n", upStk, downStk, totalStk));
+                sb.append("\n");
+            }
+        }
+
+        // T-1 大盘补充（仅保留涨停跌停等无法实时获取的数据）
+        String marketOverview = marketDataService.getMarketOverviewWithoutStaleStats();
         if (!marketOverview.isEmpty()) {
+            sb.append("## 大盘补充（昨日数据 T-1）\n");
             sb.append(marketOverview).append("\n");
         }
 
-        // 行业板块 + 相对强度
+        // 行业板块相对强度（T-1 数据，实时板块已在上文展示）
         double changePct = quote != null && quote.get("changePercent") != null
                 ? ((Number) quote.get("changePercent")).doubleValue() : 0;
         String sectorCtx = marketDataService.getSectorContext(symbol, changePct);
         if (!sectorCtx.isEmpty()) {
+            sb.append("## 个股所属板块（昨日数据 T-1）\n");
             sb.append(sectorCtx).append("\n");
         }
 
@@ -270,6 +333,12 @@ public class TradingAnalysisService {
         if (v == null) return 0;
         if (v instanceof Number) return ((Number) v).doubleValue();
         try { return Double.parseDouble(v.toString()); } catch (Exception e) { return 0; }
+    }
+
+    private static int toInt(Object v) {
+        if (v == null) return 0;
+        if (v instanceof Number) return ((Number) v).intValue();
+        try { return Integer.parseInt(v.toString()); } catch (Exception e) { return 0; }
     }
 
     private static long toLong(Object v) {

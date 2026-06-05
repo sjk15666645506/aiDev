@@ -139,7 +139,6 @@ public class EtfAnalysisService {
         p.append("===== 基金信息 =====\n");
         p.append("- 跟踪指数及其表现\n");
         p.append("- 基金规模和流动性评估\n");
-        p.append("- 管理费率影响\n");
         p.append("- 跟踪误差分析\n\n");
         p.append("===== 风险提示 =====\n");
         p.append("- 当前主要风险因素\n");
@@ -162,9 +161,71 @@ public class EtfAnalysisService {
 
         StringBuilder sb = new StringBuilder();
 
-        // 大盘背景
-        String marketOverview = marketDataService.getMarketOverview();
+        // ══════════════════════════════════════════
+        //  实时大盘指数（T+0，与 ETF 数据同一时刻）
+        // ══════════════════════════════════════════
+        Map<String, Object> realtimeIndices = (Map<String, Object>) analysis.get("realtimeIndices");
+        if (realtimeIndices != null && !realtimeIndices.isEmpty()) {
+            sb.append("## 实时大盘指数（今日实时 T+0）\n");
+            for (Map.Entry<String, Object> e : realtimeIndices.entrySet()) {
+                Map<String, Object> idx = (Map<String, Object>) e.getValue();
+                if (idx != null) {
+                    sb.append(String.format("- %s: %.2f (%+.2f%%)\n",
+                            idx.get("name"), toDouble(idx.get("price")), toDouble(idx.get("changePercent"))));
+                }
+            }
+            sb.append("\n");
+        }
+
+        // ══════════════════════════════════════════
+        //  实时行业板块（T+0）
+        // ══════════════════════════════════════════
+        Map<String, Object> realtimeSectors = (Map<String, Object>) analysis.get("realtimeSectors");
+        if (realtimeSectors != null && !realtimeSectors.isEmpty()) {
+            sb.append("## 实时行业板块（今日实时 T+0）\n");
+            List<Map<String, Object>> topSectors = (List<Map<String, Object>>) realtimeSectors.get("topSectors");
+            if (topSectors != null && !topSectors.isEmpty()) {
+                sb.append("涨幅居前: ");
+                for (int i = 0; i < Math.min(5, topSectors.size()); i++) {
+                    Map<String, Object> sec = topSectors.get(i);
+                    sb.append(String.format("%s(%+.2f%%) ", sec.get("name"), toDouble(sec.get("changePercent"))));
+                }
+                sb.append("\n");
+            }
+            List<Map<String, Object>> bottomSectors = (List<Map<String, Object>>) realtimeSectors.get("bottomSectors");
+            if (bottomSectors != null && !bottomSectors.isEmpty()) {
+                sb.append("跌幅居前: ");
+                for (int i = 0; i < Math.min(5, bottomSectors.size()); i++) {
+                    Map<String, Object> sec = bottomSectors.get(i);
+                    sb.append(String.format("%s(%+.2f%%) ", sec.get("name"), toDouble(sec.get("changePercent"))));
+                }
+                sb.append("\n");
+            }
+            sb.append("\n");
+        }
+
+        // 实时市场宽度（板块涨跌统计）
+        if (realtimeSectors != null) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> breadth = (Map<String, Object>) realtimeSectors.get("marketBreadth");
+            if (breadth != null && !breadth.isEmpty()) {
+                sb.append("## 实时市场宽度（今日 T+0）\n");
+                int upSec = toInt(breadth.get("upSectors"));
+                int downSec = toInt(breadth.get("downSectors"));
+                int totalSec = toInt(breadth.get("totalSectors"));
+                sb.append(String.format("- 行业板块: %d涨 %d跌 (共%d个)\n", upSec, downSec, totalSec));
+                int upStk = toInt(breadth.get("upStocks"));
+                int downStk = toInt(breadth.get("downStocks"));
+                int totalStk = toInt(breadth.get("totalStocks"));
+                sb.append(String.format("- 板块内个股: 约%d涨 约%d跌 (共约%d只)\n", upStk, downStk, totalStk));
+                sb.append("\n");
+            }
+        }
+
+        // T-1 大盘背景（仅保留涨停跌停等无法实时获取的数据，已去掉过时的涨跌家数）
+        String marketOverview = marketDataService.getMarketOverviewWithoutStaleStats();
         if (!marketOverview.isEmpty()) {
+            sb.append("## 大盘补充（昨日数据 T-1）\n");
             sb.append(marketOverview).append("\n");
         }
 
@@ -182,16 +243,25 @@ public class EtfAnalysisService {
 
             // 净值和溢价率
             Object nav = quote.get("nav");
+            Object navRealtime = quote.get("navRealtime");
             Object navChg = quote.get("navChangePercent");
             Object premium = quote.get("premiumRate");
-            if (nav != null) {
+            Object premiumBasedOn = quote.get("premiumBasedOn");
+            if (nav != null || navRealtime != null) {
                 sb.append(String.format("\n## 净值与溢价率\n"));
-                sb.append(String.format("- 单位净值(NAV): %.4f\n", toDouble(nav)));
+                if (navRealtime != null) {
+                    sb.append(String.format("- 盘中实时估值: %.4f\n", toDouble(navRealtime)));
+                }
+                if (nav != null) {
+                    sb.append(String.format("- 昨日确认净值: %.4f\n", toDouble(nav)));
+                }
                 if (navChg != null) {
-                    sb.append(String.format("- 净值涨跌幅: %+.2f%%\n", toDouble(navChg)));
+                    sb.append(String.format("- 净值估值涨跌幅: %+.2f%%\n", toDouble(navChg)));
                 }
                 if (premium != null) {
-                    sb.append(String.format("- 溢价率: %+.2f%%", toDouble(premium)));
+                    String basedOn = "realtime_estimate".equals(premiumBasedOn != null ? premiumBasedOn.toString() : "")
+                            ? "基于盘中实时估值" : "基于昨日确认净值";
+                    sb.append(String.format("- 溢价率: %+.2f%%（%s）", toDouble(premium), basedOn));
                     double premVal = toDouble(premium);
                     if (premVal > 0.5) sb.append("（溢价偏高，注意风险）");
                     else if (premVal > 0) sb.append("（小幅溢价）");
@@ -211,8 +281,6 @@ public class EtfAnalysisService {
             if (trackIndex != null) sb.append(String.format("- 跟踪指数: %s\n", trackIndex));
             Object trackCode = etfInfo.get("trackIndexCode");
             if (trackCode != null) sb.append(String.format("- 指数代码: %s\n", trackCode));
-            Object fee = etfInfo.get("managementFee");
-            if (fee != null) sb.append(String.format("- 管理费率: %s%%\n", fee));
             Object scale = etfInfo.get("fundScale");
             if (scale != null) sb.append(String.format("- 基金规模: %s\n", scale));
         }
@@ -254,6 +322,12 @@ public class EtfAnalysisService {
         if (v == null) return 0;
         if (v instanceof Number) return ((Number) v).doubleValue();
         try { return Double.parseDouble(v.toString()); } catch (Exception e) { return 0; }
+    }
+
+    private static int toInt(Object v) {
+        if (v == null) return 0;
+        if (v instanceof Number) return ((Number) v).intValue();
+        try { return Integer.parseInt(v.toString()); } catch (Exception e) { return 0; }
     }
 
     private static long toLong(Object v) {

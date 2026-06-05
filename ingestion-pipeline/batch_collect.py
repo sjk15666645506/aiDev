@@ -401,16 +401,20 @@ def _supplement_etf_nav(etf_snapshot):
             m = re.search(r'jsonpgz\((.*?)\)', text)
             if m:
                 d = json.loads(m.group(1))
-                nav = float(d.get("dwjz", 0) or 0)
+                dwjz = float(d.get("dwjz", 0) or 0)
+                gsz = float(d.get("gsz", 0) or 0)
                 gszzl = float(d.get("gszzl", 0) or 0)
-                if nav:
-                    etf_snapshot[code]["nav"] = round(nav, 4)
+                if dwjz:
+                    etf_snapshot[code]["nav"] = round(dwjz, 4)
+                if gsz:
+                    etf_snapshot[code]["navRealtime"] = round(gsz, 4)
                 if gszzl:
-                    etf_snapshot[code]["estimatedChangePercent"] = round(gszzl, 2)
-                # 计算溢价率
+                    etf_snapshot[code]["navChangePercent"] = round(gszzl, 2)
+                # 计算溢价率：优先用盘中实时估值，盘后用确认净值
+                nav_for_premium = gsz or dwjz
                 price = etf_snapshot[code].get("price", 0)
-                if nav and price and nav > 0:
-                    etf_snapshot[code]["premiumRate"] = round((price - nav) / nav * 100, 2)
+                if nav_for_premium and price and nav_for_premium > 0:
+                    etf_snapshot[code]["premiumRate"] = round((price - nav_for_premium) / nav_for_premium * 100, 2)
         except Exception:
             pass
         done += 1

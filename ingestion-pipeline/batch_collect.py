@@ -410,8 +410,8 @@ def _supplement_etf_nav(etf_snapshot):
                     etf_snapshot[code]["navRealtime"] = round(gsz, 4)
                 if gszzl:
                     etf_snapshot[code]["navChangePercent"] = round(gszzl, 2)
-                # 计算溢价率：优先用盘中实时估值，盘后用确认净值
-                nav_for_premium = gsz or dwjz
+                # T-1 模式：溢价率基于确认净值（dwjz），不用盘中估值（gsz）
+                nav_for_premium = dwjz
                 price = etf_snapshot[code].get("price", 0)
                 if nav_for_premium and price and nav_for_premium > 0:
                     etf_snapshot[code]["premiumRate"] = round((price - nav_for_premium) / nav_for_premium * 100, 2)
@@ -631,7 +631,7 @@ def save_daily(snapshot, indices, stats, sectors_info, tops, etf_snapshot=None, 
     # 精简快照（压缩）
     snap_compact = {}
     for code, s in snapshot.items():
-        snap_compact[code] = {k: s[k] for k in ["name", "price", "change", "prevClose", "volume", "amount"]}
+        snap_compact[code] = {k: s[k] for k in ["name", "price", "change", "prevClose", "open", "high", "low", "volume", "amount"] if k in s}
 
     with gzip.open(os.path.join(day_dir, "snapshot.json.gz"), "wt", encoding="utf-8") as f:
         json.dump(snap_compact, f, ensure_ascii=False)
@@ -640,7 +640,7 @@ def save_daily(snapshot, indices, stats, sectors_info, tops, etf_snapshot=None, 
     if etf_snapshot:
         etf_compact = {}
         for code, s in etf_snapshot.items():
-            etf_compact[code] = {k: s[k] for k in ["name", "price", "change", "prevClose", "volume", "amount", "nav", "premiumRate"] if k in s}
+            etf_compact[code] = {k: s[k] for k in ["name", "price", "change", "prevClose", "open", "high", "low", "volume", "amount", "nav", "premiumRate"] if k in s}
         with gzip.open(os.path.join(day_dir, "etf_snapshot.json.gz"), "wt", encoding="utf-8") as f:
             json.dump(etf_compact, f, ensure_ascii=False)
 
@@ -697,6 +697,225 @@ def save_daily(snapshot, indices, stats, sectors_info, tops, etf_snapshot=None, 
         print(f"   板块: {sectors_info['totalSectors']} 个 | 最强 {sectors_info['topSectors'][0]['name'] if sectors_info['topSectors'] else '?'}", file=sys.stderr)
 
 
+# ── K 线采集（T-1 本地存储）───────────────────
+
+KLINE_DIR = os.path.join(BASE_DIR, "kline")
+
+
+def _kline_market(code):
+    """识别 A 股/ETF 的东财市场编号。"""
+    return "1" if code.startswith(("6", "9", "5")) else "0"
+
+
+def _kline_sina_symbol(code):
+    """将代码转为新浪 K 线 API 的 symbol 格式。sh600519 / sz000001"""
+    prefix = "sh" if code.startswith(("6", "9", "5")) else "sz"
+    return f"{prefix}{code}"
+
+
+def _fetch_kline_sina(code, datalen=250):
+    """从新浪财经 API 拉取 K 线数据，返回 bars 列表。
+
+    新浪 API 限流严格（HTTP 456），需控制请求频率。
+    返回: [{date, open, close, high, low, volume}, ...] 或 []
+    """
+    symbol = _kline_sina_symbol(code)
+    url = (
+        f"https://money.finance.sina.com.cn/quotes_service/api/json_v2.php"
+        f"/CN_MarketData.getKLineData?symbol={symbol}&scale=240&ma=no&datalen={datalen}"
+    )
+    for attempt in range(4):
+        try:
+            resp = urllib.request.urlopen(
+                urllib.request.Request(url, headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Referer": "https://finance.sina.com.cn",
+                }), timeout=15)
+            data = json.loads(resp.read().decode("utf-8"))
+            bars = []
+            for item in data:
+                bars.append({
+                    "date": item["day"],
+                    "open": float(item["open"]),
+                    "close": float(item["close"]),
+                    "high": float(item["high"]),
+                    "low": float(item["low"]),
+                    "volume": int(float(item["volume"])),
+                })
+            return bars
+        except urllib.error.HTTPError as e:
+            if e.code == 456:
+                # 新浪限流，指数退避
+                wait = 10 * (2 ** attempt)  # 10s, 20s, 40s, 80s
+                print(f"    新浪限流 {code}，等待 {wait}s...", file=sys.stderr)
+                time.sleep(wait)
+            else:
+                return []
+        except Exception:
+            return []
+    return []
+
+
+def collect_kline_batch(code_list, limit=250):
+    """批量从新浪财经 API 拉取 K 线，写入 market_data/kline/{code}.json。
+
+    code_list: [{"code": "588000", "name": "..."}, ...]
+    limit: 回填天数（默认 250 个交易日）
+    数据源: 新浪财经（限流严格，串行+1s间隔）
+    """
+    os.makedirs(KLINE_DIR, exist_ok=True)
+
+    total = len(code_list)
+    success = 0
+    failed = 0
+    end_date = date.today().strftime("%Y%m%d")
+    batch_size = 100  # 每 100 只暂停一次
+
+    for batch_start in range(0, total, batch_size):
+        batch = code_list[batch_start:batch_start + batch_size]
+        for item in batch:
+            code = item["code"]
+            name = item.get("name", "")
+            market = _kline_market(code)
+            filepath = os.path.join(KLINE_DIR, f"{code}.json")
+
+            # 已回填过且 lastUpdate == 今天则跳过
+            if os.path.exists(filepath):
+                try:
+                    existing = json.load(open(filepath))
+                    if existing.get("lastUpdate") == end_date and len(existing.get("bars", [])) >= limit - 5:
+                        success += 1
+                        continue
+                except Exception:
+                    pass
+
+            bars = _fetch_kline_sina(code, datalen=limit)
+            if bars:
+                kline_data = {
+                    "code": code,
+                    "name": name,
+                    "market": "SH" if market == "1" else "SZ",
+                    "fqt": 1,
+                    "lastUpdate": end_date,
+                    "bars": bars[-limit:],
+                }
+                json.dump(kline_data, open(filepath, "w"), ensure_ascii=False)
+                success += 1
+            else:
+                failed += 1
+            time.sleep(1.5)  # 每请求间隔 1.5s
+
+        done = min(batch_start + batch_size, total)
+        print(f"  K线进度: {done}/{total} (成功 {success}, 失败 {failed})", file=sys.stderr)
+        if done < total:
+            time.sleep(30)  # 批间暂停 30s
+
+    print(f"K线采集完成: {success}/{total}", file=sys.stderr)
+
+
+def incremental_append_kline(stock_list, etf_list):
+    """每日增量追加当天 K 线到本地文件（新浪财经 API）。
+
+    - 无 kline 文件: 自动拉取 250 日全量（内联回填）
+    - 已有 kline 文件且 lastUpdate != today: 拉取最新 1 日追加
+    - 自动创建 kline/ 目录
+    数据源: 新浪财经（限流严格，串行+1s间隔）
+    """
+    os.makedirs(KLINE_DIR, exist_ok=True)
+
+    all_items = [(s["code"], s.get("name", "")) for s in stock_list] + \
+                [(e["code"], e.get("name", "")) for e in etf_list]
+    today = date.today().strftime("%Y%m%d")
+
+    # 分类：增量追加 vs 全量回填
+    need_incremental = []
+    need_backfill = []
+    for code, name in all_items:
+        filepath = os.path.join(KLINE_DIR, f"{code}.json")
+        if not os.path.exists(filepath):
+            need_backfill.append((code, name))
+            continue
+        try:
+            kline_data = json.load(open(filepath))
+            if kline_data.get("lastUpdate") == today:
+                continue
+            need_incremental.append((code, name, filepath, kline_data))
+        except Exception:
+            need_backfill.append((code, name))
+
+    # ── 全量回填（无 kline 文件的标的）──
+    if need_backfill:
+        print(f"K线全量回填: {len(need_backfill)} 只缺失文件，开始内联回填", file=sys.stderr)
+        bf_success = 0
+        bf_failed = 0
+        batch_size = 100
+
+        for batch_start in range(0, len(need_backfill), batch_size):
+            batch = need_backfill[batch_start:batch_start + batch_size]
+            for code, name in batch:
+                bars = _fetch_kline_sina(code, datalen=250)
+                if bars:
+                    market = _kline_market(code)
+                    kline_data = {
+                        "code": code,
+                        "name": name,
+                        "market": "SH" if market == "1" else "SZ",
+                        "fqt": 1,
+                        "lastUpdate": today,
+                        "bars": bars[-250:],
+                    }
+                    filepath = os.path.join(KLINE_DIR, f"{code}.json")
+                    json.dump(kline_data, open(filepath, "w"), ensure_ascii=False)
+                    bf_success += 1
+                else:
+                    bf_failed += 1
+                time.sleep(1.5)
+            done = min(batch_start + batch_size, len(need_backfill))
+            print(f"  回填进度: {done}/{len(need_backfill)} (成功 {bf_success}, 失败 {bf_failed})", file=sys.stderr)
+            if done < len(need_backfill):
+                time.sleep(30)
+
+        print(f"K线全量回填完成: {bf_success} 只成功, {bf_failed} 只失败", file=sys.stderr)
+
+    # ── 增量追加（已有 kline 文件的标的）──
+    total = len(need_incremental)
+    if total == 0:
+        if not need_backfill:
+            print("K线增量追加: 所有标的已是最新", file=sys.stderr)
+        return
+
+    print(f"K线增量追加: {total} 只需更新", file=sys.stderr)
+
+    updated = 0
+    failed = 0
+    batch_size = 100
+
+    for batch_start in range(0, total, batch_size):
+        batch = need_incremental[batch_start:batch_start + batch_size]
+        for code, name, filepath, kline_data in batch:
+            bars = _fetch_kline_sina(code, datalen=1)
+            if bars:
+                # 检查日期是否比已有最后一天更新
+                last_date = kline_data["bars"][-1]["date"].replace("-", "") if kline_data["bars"] else ""
+                new_date = bars[0]["date"].replace("-", "")
+                if new_date > last_date:
+                    kline_data["bars"].append(bars[0])
+                    if len(kline_data["bars"]) > 250:
+                        kline_data["bars"] = kline_data["bars"][-250:]
+                kline_data["lastUpdate"] = today
+                json.dump(kline_data, open(filepath, "w"), ensure_ascii=False)
+                updated += 1
+            else:
+                failed += 1
+            time.sleep(1.5)
+        done = min(batch_start + batch_size, total)
+        print(f"  增量进度: {done}/{total} (更新 {updated}, 失败 {failed})", file=sys.stderr)
+        if done < total:
+            time.sleep(30)
+
+    print(f"K线增量追加完成: {updated} 只更新, {failed} 只失败", file=sys.stderr)
+
+
 # ── 状态 ──────────────────────────────────────
 
 def show_status():
@@ -736,6 +955,17 @@ if __name__ == "__main__":
     if "--status" in sys.argv:
         show_status()
         sys.exit(0)
+
+    # K 线全量回填模式
+    if "--kline-backfill" in sys.argv:
+        stocks = load_stock_list()
+        etf_list = load_etf_list()
+        all_items = [{"code": s["code"], "name": s.get("name", "")} for s in stocks] + \
+                    [{"code": e["code"], "name": e.get("name", "")} for e in etf_list]
+        print(f"K线全量回填: {len(all_items)} 只标的", file=sys.stderr)
+        collect_kline_batch(all_items, limit=250)
+        sys.exit(0)
+
     force_update = "--update-list" in sys.argv
     no_etf = "--no-etf" in sys.argv
 
@@ -775,6 +1005,9 @@ if __name__ == "__main__":
 
     # 保存
     save_daily(snapshot, indices, stats, sectors_info, tops, etf_snapshot=etf_snapshot)
+
+    # K 线增量追加
+    incremental_append_kline(stocks, etf_list if etf_list else [])
 
     # 行业映射持续累积
     if industry_map:

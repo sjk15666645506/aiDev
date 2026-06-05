@@ -43,7 +43,7 @@ public class MarketDataService {
         if (daily == null) return "";
 
         StringBuilder sb = new StringBuilder();
-        sb.append("## 今日大盘概况\n");
+        sb.append("## 大盘概况\n");
 
         // 指数
         @SuppressWarnings("unchecked")
@@ -95,29 +95,11 @@ public class MarketDataService {
     }
 
     /**
-     * 获取大盘概况，但去掉与实时数据冲突的过时统计（涨跌家数、涨跌分布）。
-     * 仅保留涨停/跌停数等无法实时获取的数据，配合 T+0 的实时市场宽度使用。
+     * @deprecated 使用 {@link #getMarketOverview()} 代替。T-1 模式下所有数据时效一致，无需区分。
      */
+    @Deprecated
     public String getMarketOverviewWithoutStaleStats() {
-        Map<String, Object> daily = loadDailyData();
-        if (daily == null) return "";
-
-        StringBuilder sb = new StringBuilder();
-
-        // 仅保留涨停/跌停（这些无法实时获取，且不会误导 LLM 对今日情绪的判断）
-        @SuppressWarnings("unchecked")
-        Map<String, Object> stats = (Map<String, Object>) daily.get("marketStats");
-        if (stats != null && !stats.isEmpty()) {
-            Object limitUp = stats.get("limitUpCount");
-            Object limitDown = stats.get("limitDownCount");
-            Object avgChg = stats.get("avgChange");
-
-            sb.append(String.format("- 昨日涨停: %s  |  跌停: %s\n",
-                    limitUp != null ? limitUp : "?", limitDown != null ? limitDown : "?"));
-            sb.append(String.format("- 昨日平均涨跌幅: %s%%\n", avgChg != null ? avgChg : "?"));
-        }
-
-        return sb.toString();
+        return getMarketOverview();
     }
 
     /**
@@ -154,7 +136,7 @@ public class MarketDataService {
     }
 
     /**
-     * 检查个股是否在昨日（T-1）的 TOP 榜单中。
+     * 检查个股是否在 TOP 榜单中。
      *
      * @param symbol 股票代码
      * @return 榜单信息文本，不在榜则返回空字符串
@@ -174,24 +156,24 @@ public class MarketDataService {
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> gainers = (List<Map<String, Object>>) topStocks.get("topGainers");
         if (gainers != null && gainers.stream().anyMatch(s -> code.equals(s.get("code")))) {
-            tags.add("昨日涨幅 TOP30");
+            tags.add("涨幅 TOP30");
         }
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> losers = (List<Map<String, Object>>) topStocks.get("topLosers");
         if (losers != null && losers.stream().anyMatch(s -> code.equals(s.get("code")))) {
-            tags.add("昨日跌幅 TOP30");
+            tags.add("跌幅 TOP30");
         }
 
         @SuppressWarnings("unchecked")
         List<Map<String, Object>> volume = (List<Map<String, Object>>) topStocks.get("topVolume");
         if (volume != null && volume.stream().anyMatch(s -> code.equals(s.get("code")))) {
-            tags.add("昨日成交额 TOP30");
+            tags.add("成交额 TOP30");
         }
 
         if (tags.isEmpty()) return "";
 
-        return "## 市场关注度（昨日数据 T-1）\n- " + String.join("、", tags) + "\n";
+        return "## 市场关注度\n- " + String.join("、", tags) + "\n";
     }
 
     // ══════════════════════════════════════════════

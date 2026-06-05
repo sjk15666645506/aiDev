@@ -162,11 +162,11 @@ public class EtfAnalysisService {
         StringBuilder sb = new StringBuilder();
 
         // ══════════════════════════════════════════
-        //  实时大盘指数（T+0，与 ETF 数据同一时刻）
+        //  大盘指数
         // ══════════════════════════════════════════
         Map<String, Object> realtimeIndices = (Map<String, Object>) analysis.get("realtimeIndices");
         if (realtimeIndices != null && !realtimeIndices.isEmpty()) {
-            sb.append("## 实时大盘指数（今日实时 T+0）\n");
+            sb.append("## 大盘指数\n");
             for (Map.Entry<String, Object> e : realtimeIndices.entrySet()) {
                 Map<String, Object> idx = (Map<String, Object>) e.getValue();
                 if (idx != null) {
@@ -178,11 +178,11 @@ public class EtfAnalysisService {
         }
 
         // ══════════════════════════════════════════
-        //  实时行业板块（T+0）
+        //  行业板块
         // ══════════════════════════════════════════
         Map<String, Object> realtimeSectors = (Map<String, Object>) analysis.get("realtimeSectors");
         if (realtimeSectors != null && !realtimeSectors.isEmpty()) {
-            sb.append("## 实时行业板块（今日实时 T+0）\n");
+            sb.append("## 行业板块\n");
             List<Map<String, Object>> topSectors = (List<Map<String, Object>>) realtimeSectors.get("topSectors");
             if (topSectors != null && !topSectors.isEmpty()) {
                 sb.append("涨幅居前: ");
@@ -204,12 +204,12 @@ public class EtfAnalysisService {
             sb.append("\n");
         }
 
-        // 实时市场宽度（板块涨跌统计）
+        // 市场宽度（板块涨跌统计）
         if (realtimeSectors != null) {
             @SuppressWarnings("unchecked")
             Map<String, Object> breadth = (Map<String, Object>) realtimeSectors.get("marketBreadth");
             if (breadth != null && !breadth.isEmpty()) {
-                sb.append("## 实时市场宽度（今日 T+0）\n");
+                sb.append("## 市场宽度\n");
                 int upSec = toInt(breadth.get("upSectors"));
                 int downSec = toInt(breadth.get("downSectors"));
                 int totalSec = toInt(breadth.get("totalSectors"));
@@ -222,17 +222,17 @@ public class EtfAnalysisService {
             }
         }
 
-        // T-1 大盘背景（仅保留涨停跌停等无法实时获取的数据，已去掉过时的涨跌家数）
-        String marketOverview = marketDataService.getMarketOverviewWithoutStaleStats();
+        // 大盘背景
+        String marketOverview = marketDataService.getMarketOverview();
         if (!marketOverview.isEmpty()) {
-            sb.append("## 大盘补充（昨日数据 T-1）\n");
+            sb.append("## 大盘补充\n");
             sb.append(marketOverview).append("\n");
         }
 
         // ══════════════════════════════════════════
         //  ETF 报价（含净值/溢价率）
         // ══════════════════════════════════════════
-        sb.append("## ETF 实时报价\n");
+        sb.append("## ETF 报价\n");
         if (quote != null) {
             sb.append(String.format("- 代码: %s  |  名称: %s\n", quote.get("symbol"), quote.get("name")));
             sb.append(String.format("- 现价: %.2f\n", toDouble(quote.get("price"))));
@@ -247,21 +247,11 @@ public class EtfAnalysisService {
             Object navChg = quote.get("navChangePercent");
             Object premium = quote.get("premiumRate");
             Object premiumBasedOn = quote.get("premiumBasedOn");
-            if (nav != null || navRealtime != null) {
+            if (nav != null) {
                 sb.append(String.format("\n## 净值与溢价率\n"));
-                if (navRealtime != null) {
-                    sb.append(String.format("- 盘中实时估值: %.4f\n", toDouble(navRealtime)));
-                }
-                if (nav != null) {
-                    sb.append(String.format("- 昨日确认净值: %.4f\n", toDouble(nav)));
-                }
-                if (navChg != null) {
-                    sb.append(String.format("- 净值估值涨跌幅: %+.2f%%\n", toDouble(navChg)));
-                }
+                sb.append(String.format("- 确认净值: %.4f\n", toDouble(nav)));
                 if (premium != null) {
-                    String basedOn = "realtime_estimate".equals(premiumBasedOn != null ? premiumBasedOn.toString() : "")
-                            ? "基于盘中实时估值" : "基于昨日确认净值";
-                    sb.append(String.format("- 溢价率: %+.2f%%（%s）", toDouble(premium), basedOn));
+                    sb.append(String.format("- 溢价率: %+.2f%%（基于确认净值）", toDouble(premium)));
                     double premVal = toDouble(premium);
                     if (premVal > 0.5) sb.append("（溢价偏高，注意风险）");
                     else if (premVal > 0) sb.append("（小幅溢价）");

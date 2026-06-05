@@ -19,8 +19,115 @@ import urllib.parse
 #  速率限制 & 缓存（避免被 API 限流）
 # ═══════════════════════════════════════════════════════════════
 
-import time as _time
-import functools as _functools
+import os as _os
+import gzip as _gzip
+
+_MARKET_DATA_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "market_data")
+_KLINE_DIR = _os.path.join(_MARKET_DATA_DIR, "kline")
+_META_DIR = _os.path.join(_MARKET_DATA_DIR, "meta")
+
+_snapshot_cache = None
+_snapshot_cache_dir = None
+_etf_cache = None
+_etf_cache_dir = None
+
+
+def find_latest_data_dir():
+    """定位最新的本地数据目录（找最近有数据的交易日）。"""
+    if not _os.path.exists(_MARKET_DATA_DIR):
+        return None
+    dirs = [d for d in _os.listdir(_MARKET_DATA_DIR)
+            if _os.path.isdir(_os.path.join(_MARKET_DATA_DIR, d)) and re.match(r'^\d{8}$', d)]
+    if not dirs:
+        return None
+    dirs.sort(reverse=True)
+    for d in dirs:
+        if _os.path.exists(_os.path.join(_MARKET_DATA_DIR, d, "snapshot.json.gz")):
+            return _os.path.join(_MARKET_DATA_DIR, d)
+    return None
+
+
+def _load_stock_snapshot(data_dir):
+    """加载个股快照（带进程内缓存）。"""
+    global _snapshot_cache, _snapshot_cache_dir
+    if _snapshot_cache and _snapshot_cache_dir == data_dir:
+        return _snapshot_cache
+    filepath = _os.path.join(data_dir, "snapshot.json.gz")
+    if _os.path.exists(filepath):
+        _snapshot_cache = json.load(_gzip.open(filepath, "rt", encoding="utf-8"))
+        _snapshot_cache_dir = data_dir
+        return _snapshot_cache
+    return {}
+
+
+def _load_etf_snapshot(data_dir):
+    """加载 ETF 快照（带进程内缓存）。"""
+    global _etf_cache, _etf_cache_dir
+    if _etf_cache and _etf_cache_dir == data_dir:
+        return _etf_cache
+    filepath = _os.path.join(data_dir, "etf_snapshot.json.gz")
+    if _os.path.exists(filepath):
+        _etf_cache = json.load(_gzip.open(filepath, "rt", encoding="utf-8"))
+        _etf_cache_dir = data_dir
+        return _etf_cache
+    return {}
+
+
+def load_local_indices():
+    """从本地 indices.json 读取指数数据，替代新浪实时 API。"""
+    data_dir = find_latest_data_dir()
+    if not data_dir:
+        return {}
+    filepath = _os.path.join(data_dir, "indices.json")
+    if not _os.path.exists(filepath):
+        return {}
+    try:
+        return json.load(open(filepath))
+    except Exception:
+        return {}
+
+
+def load_local_sectors():
+    """从本地 sectors.json 读取板块数据，替代新浪实时 API。"""
+    data_dir = find_latest_data_dir()
+    if not data_dir:
+        return {}
+    filepath = _os.path.join(data_dir, "sectors.json")
+    if not _os.path.exists(filepath):
+        return {}
+    try:
+        sectors_data = json.load(open(filepath))
+        top = sectors_data.get("topSectors", [])
+        bottom = sectors_data.get("bottomSectors", [])
+        all_sectors = top + [s for s in bottom if s.get("name") not in {t.get("name") for t in top}]
+        up_count = sum(1 for s in all_sectors if s.get("avgChangePercent", 0) > 0)
+        down_count = sum(1 for s in all_sectors if s.get("avgChangePercent", 0) < 0)
+        flat_count = sum(1 for s in all_sectors if s.get("avgChangePercent", 0) == 0)
+        sectors_data["marketBreadth"] = {
+            "upSectors": up_count,
+            "downSectors": down_count,
+            "flatSectors": flat_count,
+        }
+        return sectors_data
+    except Exception:
+        return {}
+
+
+def load_local_kline(symbol, period="1mo"):
+    """从本地 kline/{symbol}.json 读取 K 线数据。"""
+    s = symbol.strip()
+    if not re.match(r"^\d{6}$", s):
+        return []
+    filepath = _os.path.join(_KLINE_DIR, f"{s}.json")
+    if not _os.path.exists(filepath):
+        return []
+    try:
+        data = json.load(open(filepath))
+        bars = data.get("bars", [])
+        limit = {"1mo": 20, "3mo": 60, "6mo": 120, "1y": 250}.get(period, 60)
+        return bars[-limit:]
+    except Exception:
+        return []
 
 class RateLimiter:
     """令牌桶限流器。"""
@@ -190,125 +297,15 @@ _MAJOR_INDICES = {
 
 
 def sina_realtime_indices():
-    """从 Sina 获取主要指数的实时行情（T+0），用于补充分析上下文。"""
-    codes = ",".join(_MAJOR_INDICES.keys())
-    url = f"https://hq.sinajs.cn/list={codes}"
-    req = urllib.request.Request(url, headers={
-        "Referer": "https://finance.sina.com.cn",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
-    })
-    try:
-        resp = urllib.request.urlopen(req, timeout=8)
-        text = resp.read().decode("gbk")
-    except Exception:
-        return {}
-
-    result = {}
-    for line in text.strip().split("\n"):
-        m = re.search(r'hq_str_(\w+)="(.+)"', line)
-        if not m:
-            continue
-        code = m.group(1)
-        content = m.group(2)
-        parts = content.split(",")
-        if len(parts) < 4:
-            continue
-        name = parts[0]
-        prev_close = _f(parts, 2)
-        current = _f(parts, 3)
-        high = _f(parts, 4) if len(parts) > 4 else 0
-        low = _f(parts, 5) if len(parts) > 5 else 0
-        change = round(current - prev_close, 2) if current and prev_close else 0
-        change_pct = round(change / prev_close * 100, 2) if prev_close and prev_close != 0 else 0
-        result[code] = {
-            "name": name,
-            "price": current,
-            "change": change,
-            "changePercent": change_pct,
-            "prevClose": prev_close,
-            "high": high,
-            "low": low,
-        }
-    return result
+    """从本地 indices.json 读取指数数据（T-1），兼容旧调用方。"""
+    return load_local_indices()
 
 
 # ── 实时行业板块（新浪财经）─────────────────
 
 def sina_realtime_sectors():
-    """从新浪财经获取行业板块实时涨跌（T+0），替代 training.json 中的 T-1 板块数据。
-
-    返回: dict，包含 topSectors / bottomSectors / totalSectors
-    """
-    url = "https://vip.stock.finance.sina.com.cn/q/view/newSinaHy.php"
-    req = urllib.request.Request(url, headers={
-        "Referer": "https://finance.sina.com.cn",
-        "User-Agent": "Mozilla/5.0",
-    })
-    try:
-        resp = urllib.request.urlopen(req, timeout=8)
-        text = resp.read().decode("gbk")
-    except Exception:
-        return {}
-
-    m = re.search(r'=\s*(\{.*\})', text)
-    if not m:
-        return {}
-
-    try:
-        data = json.loads(m.group(1))
-    except Exception:
-        return {}
-
-    sectors = []
-    for k, v in data.items():
-        parts = v.split(",")
-        if len(parts) < 6:
-            continue
-        try:
-            chg_pct = float(parts[5])
-            count = int(parts[2]) if parts[2].isdigit() else 0
-        except (ValueError, IndexError):
-            continue
-        sec = {
-            "name": parts[1],
-            "stockCount": count,
-            "changePercent": round(chg_pct, 2),
-        }
-        # 领涨股
-        if len(parts) >= 12:
-            try:
-                sec["leadStock"] = parts[11]
-                sec["leadStockCode"] = parts[8]
-                sec["leadStockChange"] = float(parts[10])
-            except (ValueError, IndexError):
-                pass
-        sectors.append(sec)
-
-    sectors.sort(key=lambda x: x.get("changePercent", 0), reverse=True)
-
-    # 汇总板块涨跌统计（行业板块互斥，可反映市场宽度）
-    up_count = sum(1 for s in sectors if s["changePercent"] > 0)
-    down_count = sum(1 for s in sectors if s["changePercent"] < 0)
-    flat_count = sum(1 for s in sectors if s["changePercent"] == 0)
-    # 按板块股票数加权统计（更接近实际涨跌家数）
-    up_stocks = sum(s["stockCount"] for s in sectors if s["changePercent"] > 0)
-    down_stocks = sum(s["stockCount"] for s in sectors if s["changePercent"] < 0)
-    all_stocks = sum(s["stockCount"] for s in sectors)
-
-    return {
-        "topSectors": sectors[:20],
-        "bottomSectors": sectors[-20:] if len(sectors) >= 20 else sectors[len(sectors)//2:],
-        "totalSectors": len(sectors),
-        "marketBreadth": {
-            "upSectors": up_count,
-            "downSectors": down_count,
-            "flatSectors": flat_count,
-            "upStocks": up_stocks,
-            "downStocks": down_stocks,
-            "totalStocks": all_stocks,
-            "note": "板块涨跌为实时(T+0)，个股数为板块成分股合计(有少量交叉)",
-        },
-    }
+    """从本地 sectors.json 读取板块数据（T-1），兼容旧调用方。"""
+    return load_local_sectors()
 
 
 def _to_sina_symbol(symbol):
@@ -544,10 +541,24 @@ def _eastmoney_fund_detail(symbol):
 
 
 def get_etf_info(symbol):
-    """获取 ETF 基金详细信息：跟踪指数、规模等。"""
+    """获取 ETF 基金详细信息：跟踪指数等。优先本地缓存（TTL 30天），缓存未命中则从东财 API 获取。"""
     if not re.match(r"^\d{6}$", symbol):
         return {}
 
+    # 1. 尝试本地缓存
+    info_dir = _os.path.join(_META_DIR, "etf_info")
+    cache_file = _os.path.join(info_dir, f"{symbol}.json")
+    if _os.path.exists(cache_file):
+        try:
+            import time as _t
+            cache_data = json.load(open(cache_file))
+            # TTL 30 天
+            if _t.time() - cache_data.get("_cachedAt", 0) < 30 * 86400:
+                return {k: v for k, v in cache_data.items() if not k.startswith("_")}
+        except Exception:
+            pass
+
+    # 2. 从东财 API 获取
     url = (
         f"https://fund.eastmoney.com/pingzhongdata/{symbol}.js"
     )
@@ -561,7 +572,6 @@ def get_etf_info(symbol):
 
         info = {}
         # 解析关键变量
-        # fS_name = "基金名称"
         m = re.search(r'fS_name\s*=\s*"(.*?)"', text)
         if m:
             info["fundName"] = m.group(1)
@@ -571,9 +581,12 @@ def get_etf_info(symbol):
         if m:
             info["trackIndexCode"] = m.group(1)
 
-        # 注：pingzhongdata 接口中 fund_sourceRate/fund_Rate 为空，
-        # Data_rateInSimilarPersent 是同类排名百分比而非管理费率，
-        # 曾因正则误匹配导致显示15.23%（实际是机构持有比例），已移除。
+        # 3. 写入缓存
+        if info:
+            _os.makedirs(info_dir, exist_ok=True)
+            info["_cachedAt"] = _t.time()
+            json.dump(info, open(cache_file, "w"), ensure_ascii=False)
+            return {k: v for k, v in info.items() if not k.startswith("_")}
 
         return info
     except Exception:
@@ -645,50 +658,60 @@ def _yf_history(symbol, period="1mo", interval="1d"):
 # ═══════════════════════════════════════════════════════════════
 
 def get_quote(symbol):
-    """获取报价：ETF 用 Sina+净值补充，A股优先东方财富→Sina，美股优先 Sina→yfinance。"""
-    # A 股 ETF：Sina 获取行情 + fundgz 补充净值/溢价率
-    if re.match(r"^\d{6}$", symbol) and is_etf_code(symbol):
-        q = sina_quote(symbol)
-        if q and q.get("price"):
-            q["source"] = "sina_etf"
-            q["type"] = "etf"
-            # 补充净值信息
-            nav_info = _eastmoney_fund_detail(symbol)
-            if nav_info:
-                q.update(nav_info)
-                # 计算溢价率：优先用盘中实时估值(gsz)，盘后用确认净值(dwjz)
-                nav_for_premium = nav_info.get("navRealtime") or nav_info.get("nav", 0)
-                price = q.get("price", 0)
-                if nav_for_premium and price and nav_for_premium > 0:
-                    q["premiumRate"] = round((price - nav_for_premium) / nav_for_premium * 100, 2)
-                    # 标记溢价率使用的净值类型
-                    if nav_info.get("navRealtime"):
-                        q["premiumBasedOn"] = "realtime_estimate"   # 基于盘中估值
-                    else:
-                        q["premiumBasedOn"] = "confirmed_nav"         # 基于确认净值
-            return q
-        # 东方财富推送备选
-        q = eastmoney_etf_quote(symbol)
-        if q and q.get("price"):
-            return q
+    """获取报价：A 股/ETF 从本地 T-1 快照读取，美股用 yfinance。"""
+    s = symbol.strip()
 
-    # A 股股票：优先东方财富（更稳定），Sina 备选
-    if re.match(r"^\d{6}$", symbol):
-        q = eastmoney_quote(symbol)
-        if q and q.get("price"):
-            return q
-        # Sina 备选
-        q = sina_quote(symbol)
-        if q and q.get("price"):
-            q["source"] = "sina"
-            return q
+    # A 股 / ETF：从本地快照读取
+    if re.match(r"^\d{6}$", s):
+        data_dir = find_latest_data_dir()
+        if not data_dir:
+            return {"error": "无本地数据，请先运行 batch_collect.py", "symbol": s}
 
-    # 美股 / 港股：优先 Sina
+        if is_etf_code(s):
+            snapshot = _load_etf_snapshot(data_dir)
+        else:
+            snapshot = _load_stock_snapshot(data_dir)
+
+        info = snapshot.get(s)
+        if not info or info.get("price", 0) == 0:
+            return {"error": f"本地无 {s} 的数据", "symbol": s}
+
+        prev = info.get("prevClose", 0)
+        price = info.get("price", 0)
+        change = info.get("change", 0)
+        change_pct = round(change / prev * 100, 2) if prev and prev != 0 else 0
+
+        result = {
+            "symbol": s.upper(),
+            "name": info.get("name", ""),
+            "price": price,
+            "change": change,
+            "changePercent": change_pct,
+            "prevClose": prev,
+            "open": info.get("open", 0),
+            "dayHigh": info.get("high", 0),
+            "dayLow": info.get("low", 0),
+            "volume": info.get("volume", 0),
+            "amount": info.get("amount", 0),
+            "currency": "CNY",
+            "source": "local_t1",
+        }
+
+        # ETF 补充净值和溢价率
+        if is_etf_code(s) and "nav" in info:
+            result["nav"] = info["nav"]
+            result["type"] = "etf"
+            if "premiumRate" in info:
+                result["premiumRate"] = info["premiumRate"]
+                result["premiumBasedOn"] = "confirmed_nav"
+
+        return result
+
+    # 美股 / 港股：Sina → yfinance
     q = sina_quote(symbol)
     if q and q.get("price"):
         return q
 
-    # yfinance fallback（也支持美股 ETF 如 SPY, QQQ 等）
     try:
         import yfinance as yf
         tk = yf.Ticker(symbol)
@@ -708,7 +731,6 @@ def get_quote(symbol):
             "marketCap": info.get("marketCap") or 0,
             "currency": info.get("currency") or "USD",
         }
-        # 识别美股 ETF
         if quote_type == "ETF":
             result["type"] = "etf"
             result["nav"] = info.get("navPrice") or 0
@@ -789,15 +811,9 @@ def _sina_history(symbol, datalen=60):
 
 
 def get_history(symbol, period="1mo", interval="1d"):
-    """获取历史 K 线：A 股/ETF 用东方财富→Sina，美股用 yfinance。"""
-    # A 股 / ETF：优先东方财富，Sina 备选
+    """获取历史 K 线：A 股/ETF 从本地 kline/ 读取，美股用 yfinance。"""
     if re.match(r"^\d{6}$", symbol):
-        limit = {"1mo": 20, "3mo": 60, "6mo": 120, "1y": 250}.get(period, 60)
-        bars = _eastmoney_history(symbol, limit)
-        if bars:
-            return bars
-        datalen = limit
-        bars = _sina_history(symbol, datalen)
+        bars = load_local_kline(symbol, period)
         if bars:
             return bars
 
@@ -888,23 +904,12 @@ def get_fundamentals(symbol):
 def _compute_indicators(quote, d1m, d3m, d1y):
     """根据报价和多周期 K 线计算技术指标（股票和 ETF 通用）。
 
-    关键修正：将当日实时价格追加到 K 线末尾，
-    确保技术指标（尤其 MACD）与行情软件一致。
+    T-1 模式：K 线最后一根已是最近交易日收盘价，无需追加实时价格。
     """
     # 多周期 K 线（使用传入参数，避免重复 API 调用）
     p1m = [b["close"] for b in d1m] if d1m else []
     p3m = [b["close"] for b in d3m] if d3m else []
     p1y = [b["close"] for b in d1y] if d1y else []
-
-    # 将当日实时价格追加到 K 线末尾（与行情软件行为一致）
-    # 历史 K 线不含当日未收盘的 K 线，而行情软件的 MACD 包含当日实时价
-    cur_price = quote.get("price", 0) if quote else 0
-    if cur_price and p1y and p1y[-1] != cur_price:
-        p1y.append(cur_price)
-    if cur_price and p3m and p3m[-1] != cur_price:
-        p3m.append(cur_price)
-    if cur_price and p1m and p1m[-1] != cur_price:
-        p1m.append(cur_price)
 
     def _sma(p, n):
         return round(sum(p[-n:]) / n, 2) if len(p) >= n else (p[-1] if p else 0)
@@ -1043,7 +1048,7 @@ def get_full(symbol):
         "quote": quote,
         "indicators": ind,
         "fundamentals": fundamentals if fundamentals else None,
-        "marketData": {"dailyKline": kline, "dataSource": "sina+yfinance+eastmoney"},
+        "marketData": {"dailyKline": kline, "dataSource": "local_t1"},
         "realtimeIndices": sina_realtime_indices(),
         "realtimeSectors": sina_realtime_sectors(),
     }
@@ -1058,14 +1063,10 @@ def get_etf_full(symbol):
     # ETF 基金信息（跟踪指数、规模等）
     etf_info = get_etf_info(symbol)
 
-    # 计算溢价率：优先用盘中实时估值(gsz)，盘后用确认净值(dwjz)
-    # 与 get_quote() 保持一致的逻辑，避免 T-1 净值导致溢价率偏差
-    nav_realtime = quote.get("navRealtime", 0)
+    # T-1 模式：溢价率统一基于确认净值（dwjz），已由 get_quote() 从本地快照提供
     nav_confirmed = quote.get("nav", 0)
-    nav_for_premium = nav_realtime or nav_confirmed
     price = quote.get("price", 0)
-    premium_rate = round((price - nav_for_premium) / nav_for_premium * 100, 2) if nav_for_premium and nav_for_premium > 0 else None
-    premium_based_on = "realtime_estimate" if nav_realtime else "confirmed_nav"
+    premium_rate = round((price - nav_confirmed) / nav_confirmed * 100, 2) if nav_confirmed and nav_confirmed > 0 and price else None
 
     # 多周期 K 线
     d1m = get_history(symbol, "1mo", "1d")
@@ -1078,7 +1079,7 @@ def get_etf_full(symbol):
     # ETF 专用指标：溢价率（与 quote 中的 premiumRate 一致）
     if premium_rate is not None:
         ind["premiumRate"] = premium_rate
-        ind["premiumBasedOn"] = premium_based_on
+        ind["premiumBasedOn"] = "confirmed_nav"
 
     # 最近 K 线（最多 20 条）
     kline = d1m[-20:] if len(d1m) > 20 else d1m
@@ -1087,7 +1088,7 @@ def get_etf_full(symbol):
         "quote": quote,
         "indicators": ind,
         "etfInfo": etf_info if etf_info else None,
-        "marketData": {"dailyKline": kline, "dataSource": "sina+eastmoney_etf"},
+        "marketData": {"dailyKline": kline, "dataSource": "local_t1"},
         "realtimeIndices": sina_realtime_indices(),
         "realtimeSectors": sina_realtime_sectors(),
     }

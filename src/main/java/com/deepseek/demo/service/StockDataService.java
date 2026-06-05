@@ -188,7 +188,34 @@ public class StockDataService {
             }
         }
 
-        // 2. 搜索常用美股
+        // 2. 搜索 A 股 ETF
+        if (results.size() < limit) {
+            File etfFile = new File("ingestion-pipeline/market_data/meta/etf_list.json");
+            if (etfFile.exists()) {
+                try (BufferedReader br2 = new BufferedReader(
+                        new InputStreamReader(new FileInputStream(etfFile), StandardCharsets.UTF_8))) {
+                    List<Map<String, String>> etfList = objectMapper.readValue(
+                            br2, new TypeReference<List<Map<String, String>>>() {});
+                    for (Map<String, String> e : etfList) {
+                        if (results.size() >= limit) break;
+                        String code = e.getOrDefault("code", "");
+                        String name = e.getOrDefault("name", "");
+                        if (code.startsWith(q) || name.toLowerCase().replace(" ", "").contains(q)) {
+                            Map<String, String> item = new LinkedHashMap<>();
+                            item.put("code", code);
+                            item.put("name", name);
+                            item.put("market", e.getOrDefault("market", "SZ"));
+                            item.put("type", "ETF");
+                            results.add(item);
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("读取ETF清单失败: {}", e.getMessage());
+                }
+            }
+        }
+
+        // 3. 搜索常用美股
         if (results.size() < limit) {
             for (Map<String, String> us : US_STOCKS) {
                 if (results.size() >= limit) break;

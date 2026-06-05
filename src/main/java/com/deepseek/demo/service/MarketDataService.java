@@ -307,6 +307,44 @@ public class MarketDataService {
         return findLatestDate();
     }
 
+    /**
+     * 获取当天 ETF 统计数据（从 etf_stats.json）。
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getEtfStats() {
+        String latestDate = findLatestDate();
+        if (latestDate == null) return Map.of();
+
+        File file = new File(MARKET_DATA_DIR, latestDate + "/etf_stats.json");
+        if (!file.exists()) return Map.of();
+
+        try {
+            return objectMapper.readValue(file, Map.class);
+        } catch (IOException e) {
+            log.debug("读取ETF统计失败: {}", e.getMessage());
+            return Map.of();
+        }
+    }
+
+    /**
+     * 获取当天 TOP ETF 榜单（溢价榜/折价榜/成交量榜各 TOP10）。
+     */
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> getTopEtfs() {
+        Map<String, Object> stats = getEtfStats();
+        if (stats.isEmpty()) return Map.of();
+
+        Map<String, Object> result = new LinkedHashMap<>();
+        for (String key : List.of("topGainers", "topLosers", "topVolume", "topPremium", "topDiscount")) {
+            Object list = stats.get(key);
+            if (list instanceof List) {
+                List<Map<String, Object>> l = (List<Map<String, Object>>) list;
+                result.put(key, l.subList(0, Math.min(l.size(), 10)));
+            }
+        }
+        return result;
+    }
+
     private static double parsePercent(String s) {
         try {
             return Double.parseDouble(s.replace("%", ""));

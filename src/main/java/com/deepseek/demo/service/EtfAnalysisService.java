@@ -1,5 +1,6 @@
 package com.deepseek.demo.service;
 
+import com.deepseek.demo.util.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
@@ -65,8 +66,9 @@ public class EtfAnalysisService {
         try {
             llmReply = llmService.chatWithSystem(systemPrompt, userPrompt);
         } catch (Exception e) {
-            log.error("DeepSeek V4 Flash 调用失败: {}", e.getMessage());
-            analysis.put("llmError", "分析服务暂不可用: " + e.getMessage());
+            String friendlyMsg = StringUtils.friendlyLlmError(e);
+            log.error("DeepSeek V4 Flash 调用失败: {}", friendlyMsg);
+            analysis.put("llmError", friendlyMsg);
             analysis.put("analysisTime", LocalDateTime.now().format(DTF));
             return analysis;
         }

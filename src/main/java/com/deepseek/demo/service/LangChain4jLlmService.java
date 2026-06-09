@@ -66,16 +66,16 @@ public class LangChain4jLlmService implements ILlmService {
                 .apiKey(apiKey)
                 .baseUrl(baseUrl + "/v1")
                 .modelName(modelName)
-                .timeout(Duration.ofSeconds(30))
+                .timeout(Duration.ofSeconds(120))
                 .maxRetries(2)
                 .logRequests(true)
-                .logResponses(true)
+                .logResponses(false)
                 .build();
         this.streamingChatModel = OpenAiStreamingChatModel.builder()
                 .apiKey(apiKey)
                 .baseUrl(baseUrl + "/v1")
                 .modelName(modelName)
-                .timeout(Duration.ofSeconds(60))
+                .timeout(Duration.ofSeconds(120))
                 .build();
         log.info("LangChain4jLlmService initialized: baseUrl={}/v1, model={}", baseUrl, modelName);
     }

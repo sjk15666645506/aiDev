@@ -20,7 +20,7 @@ public class AppConfig {
         var factory = new HttpComponentsClientHttpRequestFactory(
                 HttpClientBuilder.create().setConnectionManager(cm).build());
         factory.setConnectTimeout(5000);   // 连接超时 5s
-        factory.setReadTimeout(30000);      // 读取超时 30s
+        factory.setReadTimeout(120000);     // 读取超时 120s（DeepSeek V4 Flash 回复可能较慢）
 
         return new RestTemplate(factory);
     }

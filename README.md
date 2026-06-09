@@ -7,11 +7,7 @@ AI 学习项目。Java 后端 REST API + Agent 引擎 + Vue 3 前端。
 - **💬 聊天** — 直接对话 DeepSeek V4 Flash
 - **📚 知识库 RAG** — 文档摄入 → 向量+全文检索 → LLM 问答
 - **🤖 Agent** — ReAct 循环 + Tool Calling + 双重确认
-- **📈 个股交易分析** — 实时行情 + 技术指标 + 大盘背景 + LLM 分析报告
-- **📊 大盘分析** — 全市场数据（指数/涨跌统计/板块排行/TOP 榜单）→ LLM 盘面研判
-- **📈 ETF 分析** — ETF 实时行情 + 净值 + 溢价率 + LLM 分析报告
 - **🔍 股票搜索** — 输入代码或名称，模糊匹配 A 股 5400+ 只 + 常用美股
-- **🔍 ETF 搜索** — 搜索 A 股 ETF（~1000 只，代码/名称匹配）
 
 ## 快速开始
 
@@ -39,25 +35,11 @@ npm run dev
 # 访问 http://localhost:5173
 ```
 
-### 3. 数据采集（可选，用于大盘分析 / ETF 分析）
-
-```bash
-cd ingestion-pipeline
-python3 batch_collect.py          # 全量采集（个股 + ETF + K 线）
-python3 batch_collect.py --no-etf  # 仅采集个股
-
-# 每日 15:30 定时执行（crontab）：
-# 30 15 * * 1-5 cd /path && python3 batch_collect.py >> collect.log
-```
-
 ## 项目结构
 
 ```
-├── src/main/java/com/deepseek/demo/    ← Java 后端主代码（含 ETF 分析）
-├── ingestion-pipeline/                  ← Python 数据采集脚本（个股 + ETF + K 线）
-│   ├── batch_collect.py                 全量日频采集
-│   ├── yfinance_data.py                 个股/ETF 行情数据获取
-│   └── market_data/                     日频数据（含 ETF 快照 + 溢价率 + K 线）
+├── src/main/java/com/deepseek/demo/    ← Java 后端主代码
+├── ingestion-pipeline/                  ← 文档摄入工具（ingest.py）
 ├── aiDev-vue/                           ← Vue 3 前端
 └── pom.xml
 ```

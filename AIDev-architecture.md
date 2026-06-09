@@ -1,7 +1,7 @@
 # AIDev 项目架构文档
 
-> RAG 系统 + 交易分析 Agent + 大盘分析 + ETF 分析。
-> Java 后端提供 REST API + Agent 引擎，Python 脚本负责文档摄入 + 金融数据采集（含 ETF + K 线）。
+> RAG 系统 + Agent 引擎。
+> Java 后端提供 REST API + Agent 引擎，Python 脚本负责文档摄入。
 > LLM 统一使用 **DeepSeek V4 Flash**（云端 API），无本地模型。
 > 基于 macOS (M5) 开发与运行。
 
@@ -38,11 +38,6 @@
 | ㉕ | **Confirmation** | 确认机制。操作计划确认 + 写操作二次确认，HITL（Human-in-the-Loop）保障安全 |
 | ㉖ | **Sina Finance API** | 新浪财经行情接口。批量查询 A 股 800 只/次，无限制，数据源稳定 |
 | ㉗ | **East Money API** | 东方财富行情/基本面接口。F10 公司概况接口（并发 50 线程），用于批量获取行业映射 |
-| ㉘ | **Market Data** | 全量 A 股日频数据。每日采集 ~5400 只股票 OHLC + 大盘指数 + 涨跌统计 + 行业板块 |
-| ㉙ | **ETF** | Exchange Traded Fund，交易型开放式指数基金。本系统采集 A 股 ETF 约 1000 只 |
-| ㉚ | **NAV** | Net Asset Value，基金净值。ETF 的内在价值，由基金持仓市值计算得出 |
-| ㉛ | **Premium Rate (溢价率)** | ETF 市场价相对净值的偏离程度，`(市价 - NAV) / NAV × 100%`。正值=溢价（买贵了），负值=折价 |
-| ㉜ | **K 线 (K-Line)** | 蜡烛图。每个时间单位的 OHLC（开盘/最高/最低/收盘价）。本系统存储日 K 线，每只股票保留 250 个交易日 |
 
 ---
 
@@ -58,32 +53,32 @@
 ┌────────────────────────────────────────────────────────────────────────┐
 │                  Java Spring Boot Backend (port 8081)                  │
 │                                                                        │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
-│  │ DeepSeekCtrl  │  │KnowledgeCtrl │  │ TradingCtrl  │  │ AgentCtrl  │ │
-│  │ /api/chat/**  │  │/api/knowledge│  │ /api/trading │  │ /api/agent │ │
-│  └───┬───┬───────┘  └──────┬───────┘  └──────┬───────┘  └──────┬─────┘ │
-│      │   │                 │                  │                │       │
-│      ▼   ▼                 ▼                  ▼                ▼       │
-│  ┌─────────────┐  ┌──────────────────┐  ┌──────────────────────────┐  │
-│  │ LangChain4j │  │  AgentSvc ㉒      │  │  TradingAnalysisSvc      │  │
-│  │ LlmSvc      │  │  (ReAct 循环㉓)    │  │  (个股分析编排)           │  │
-│  │ (DS V4)     │  └────────┬─────────┘  ├──────────────────────────┤  │
-│  └─────────────┘           │              │  MarketAnalysisSvc       │  │
-│                            │              │  (大盘分析)              │  │
-│  ┌────────────────────────────────────┐  ├──────────────────────────┤  │
-│  │          Agent 模块组件             │  │  MarketDataSvc            │  │
-│  │  ┌──────────────┐  ┌────────────┐  │  │  (读取全市场数据)         │  │
-│  │  │ ToolRegistry │  │Conversation│  │  ├──────────────────────────┤  │
-│  │  │ (@Tool扫描)   │  │Store(Redis)│  │  │  StockDataSvc             │  │
-│  │  └──────────────┘  └────────────┘  │  │  (调 yfinance_data.py)    │  │
-│  │  ┌──────────────┐  ┌────────────┐  │  ├──────────────────────────┤  │
-│  │  │ Confirmation │  │  Tools     │  │  │  EtfAnalysisSvc㉙          │  │
-│  │  │ Store(Redis) │  │(Task/Fin)  │  │  │  (ETF 分析编排)           │  │
-│  │  └──────────────┘  └────────────┘  │  ├──────────────────────────┤  │
-│  └────────────────────────────────────┘  │  EtfDataSvc               │  │
-│                                          │  (ETF 行情/净值/溢价率㉛)  │  │
-│  ┌─────────────┐  ┌──────────────────┐  └──────────────────────────┘  │
-│  │GeneralRagSvc①│  │  (RAG编排)        │                               │
+│  ┌──────────────┐  ┌──────────────┐  ┌────────────┐ │
+│  │ DeepSeekCtrl  │  │KnowledgeCtrl │  │ AgentCtrl  │ │
+│  │ /api/chat/**  │  │/api/knowledge│  │ /api/agent │ │
+│  └───┬───┬───────┘  └──────┬───────┘  └──────┬─────┘ │
+│      │   │                 │                  │       │
+│      ▼   ▼                 ▼                  ▼       │
+│  ┌─────────────┐  ┌──────────────────┐                 │
+│  │ LangChain4j │  │  AgentSvc ㉒      │                 │
+│  │ LlmSvc      │  │  (ReAct 循环㉓)    │                 │
+│  │ (DS V4)     │  └────────┬─────────┘                 │
+│  └─────────────┘           │                          │
+│                            │                           │
+│  ┌────────────────────────────────────┐                 │
+│  │          Agent 模块组件             │                 │
+│  │  ┌──────────────┐  ┌────────────┐  │                 │
+│  │  │ ToolRegistry │  │Conversation│  │                 │
+│  │  │ (@Tool扫描)   │  │Store(Redis)│  │                 │
+│  │  └──────────────┘  └────────────┘  │                 │
+│  │  ┌──────────────┐  ┌────────────┐  │                 │
+│  │  │ Confirmation │  │  Tools     │  │                 │
+│  │  │ Store(Redis) │  │(Task)      │  │                 │
+│  │  └──────────────┘  └────────────┘  │                 │
+│  └────────────────────────────────────┘                  │
+│                                                          │
+│  ┌─────────────┐  ┌──────────────────┐                   │
+│  │GeneralRagSvc①│  │  (RAG编排)        │                   │
 │  └────────┬─────┘  └──────────────────┘                               │
 │           │                                                           │
 │  ┌────────┼────────┐                                                  │
@@ -108,33 +103,12 @@
 │  └── nomic-embed-text⑬ (embedding) │
 └────────────────────────────────────┘
 
-┌─────────────────────────────────────────────────────────────────────┐
-│              Python 数据管线（含 ETF + K 线）                        │
-│                                                                     │
-│  ingestion-pipeline/                                                │
-│  ├── ingest.py                  文档摄入 → Qdrant + Meilisearch     │
-│  ├── yfinance_data.py           金融数据获取（Sina㉖ + 东财㉗ + ETF）│
-│  ├── batch_collect.py           ㉘ 全量 A 股 + ETF 日频采集         │
-│  ├── DAILY_OPS.md               每日操作手册                        │
-│  └── market_data/               日频数据存储                        │
-│      ├── meta/                                                     │
-│      │   ├── stocks_list.json      A 股清单 (~5488 只)             │
-│      │   ├── etf_list.json         ETF 清单 (~1000 只) ㉙          │
-│      │   ├── industry_map.json     行业映射 (并发 F10 获取)        │
-│      │   └── history_index.json    采集历史日期索引                 │
-│      ├── kline/                   日 K 线数据 (6451 只) ㉜         │
-│      │   ├── 000001.json           个股 K 线 (250 个交易日)        │
-│      │   └── ...                                                   │
-│      └── YYYYMMDD/               每日数据                          │
-│          ├── snapshot.json.gz      全市场快照（gzip ~170KB）       │
-│          ├── etf_snapshot.json.gz  ETF 快照+净值（gzip ~30KB）㉙   │
-│          ├── indices.json          大盘指数 (7个)                   │
-│          ├── market_stats.json     涨跌统计                         │
-│          ├── etf_stats.json        ETF 统计（净值/溢价率/TOP）㉛    │
-│          ├── sectors.json          行业板块 (109个板块)             │
-│          ├── top_stocks.json       TOP 榜单                        │
-│          └── training.json         汇总训练样本                     │
-└─────────────────────────────────────────────────────────────────────┘
+┌────────────────────────────────────┐
+│  Ingestion Pipeline                │
+│                                   │
+│  ingestion-pipeline/               │
+│  └── ingest.py   文档摄入 → Qdrant │
+└────────────────────────────────────┘
 ```
 
 ---
@@ -161,8 +135,6 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   ├── DeepSeekController.java        # 聊天 & 知识库 API
 │   │   ├── KnowledgeController.java       # 文档摄入 & 同步 API
 │   │   ├── AgentController.java           # Agent㉒ 对话 & 确认 API
-│   │   ├── TradingController.java         # 交易分析 API（/api/trading/**）
-│   │   ├── EtfController.java             # ETF 分析 API（/api/etf/**）㉙
 │   │   └── GlobalExceptionHandler.java    # 全局异常处理（@RestControllerAdvice）
 │   ├── dto/
 │   │   ├── AgentResponse.java             # Agent 统一响应
@@ -174,12 +146,6 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   ├── LangChain4jLlmService.java      # 唯一 LLM 实现（OpenAiChatModel 适配 DeepSeek API）
 │   │   ├── IVectorSearchService.java       # 向量检索接口（VectorService 实现）
 │   │   ├── IToolRegistry.java              # 工具注册接口（ToolRegistry 实现）
-│   │   ├── StockDataService.java           # 股票数据服务（调 Python yfinance_data.py）
-│   │   ├── TradingAnalysisService.java     # 个股交易分析（数据→DS V4 Flash→分析报告）
-│   │   ├── MarketDataService.java          # 全市场数据读取（读 batch_collect 采集数据）
-│   │   ├── MarketAnalysisService.java      # 大盘分析（全市场数据→DS V4 Flash→盘面研判）
-│   │   ├── EtfDataService.java             # ETF 数据服务（行情/净值㉚/溢价率㉛）
-│   │   ├── EtfAnalysisService.java         # ETF 交易分析（净值→溢价率→LLM 分析报告）
 │   │   ├── GeneralRagService.java         # 文档 RAG① 编排
 │   │   ├── VectorService.java             # 混合检索(RRF⑩) + 上下文扩展
 │   │   ├── QdrantClient.java              # Qdrant⑤ HTTP 通信
@@ -202,7 +168,6 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │   │   └── tools/
 │   │       ├── TaskTools.java             # 任务管理工具集
 │   │       ├── ExternalTools.java         # 外部服务工具集
-│   │       ├── FinanceTools.java          # 金融计算工具集
 │   │       └── MultiAgentTools.java       # 多 Agent 委派工具集
 │   ├── store/                             # 持久化层（Redis + 本地缓存降级）
 │   │   ├── IConversationStore.java        # 会话存储接口
@@ -229,22 +194,14 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 │       └── ConfirmationStoreTest.java
 ├── ingestion-pipeline/                    # Python 数据管线
 │   ├── ingest.py                          # 文档分块⑪ + embedding③ + 写入
-│   ├── yfinance_data.py                   # 金融数据获取（Sina㉖ + 东财㉗ + yfinance + ETF 净值和溢价率㉛）
-│   ├── batch_collect.py                   # ㉘ 全量 A 股 + ETF 日频采集（含 K 线㉜）
-│   ├── DAILY_OPS.md                       # 每日操作说明
-│   ├── market_data/                       # 日频全市场数据
-│   │   ├── meta/                          # 元数据（股票清单/ETF清单/行业映射/历史索引）
-│   │   ├── kline/                         # 每日 K 线数据（6451 只股票，东方财富+Sina 源）
-│   │   └── YYYYMMDD/                      # 每日快照 + ETF + 统计
-│   ├── requirements.txt                   # Python 依赖
+│   └── requirements.txt                   # Python 依赖
+├── scripts/                               # 工具脚本
 │   ├── pywc.py                            # 简化版 wc 工具
 │   └── test_pywc.py                       # pywc 测试
 └── aiDev-vue/                             # Vue 3 前端应用
     ├── src/
-    │   ├── api/index.ts                   # API 封装（chat / trading / market / agent）
+    │   ├── api/index.ts                   # API 封装
     │   ├── pages/
-    │   │   ├── TradingPage.vue            # 个股交易分析页面
-    │   │   ├── MarketPage.vue             # 大盘分析页面
     │   │   ├── ChatPage.vue               # 聊天页面
     │   │   ├── AgentPage.vue              # Agent 对话页面
     │   │   ├── KnowledgeQAPage.vue        # 知识库问答页面
@@ -268,8 +225,6 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 | DeepSeekController | 聊天、RAG①、知识库搜索的 HTTP 入口 | 8081 | Spring Boot |
 | KnowledgeController | 文档摄入、Meilisearch⑧ 同步管理 | 8081 | Spring Boot |
 | AgentController | Agent㉒ 对话 & 确认回调 HTTP 入口 | 8081 | Spring Boot |
-| TradingController | 个股分析、大盘分析、搜索、行情接口 | 8081 | Spring Boot |
-| EtfController | ETF 分析、行情、搜索、统计接口 | 8081 | Spring Boot |
 | GlobalExceptionHandler | 全局异常 → JSON（@RestControllerAdvice） | — | Spring Boot |
 | TraceFilter | 全链路 traceId 注入（MDC + X-Trace-Id 响应头） | — | OncePerRequestFilter |
 | LangChain4jLlmService | DeepSeek V4 Flash 调用（非流式 + 流式 + Tool Calling） | — | LangChain4j 0.33.x |
@@ -280,12 +235,6 @@ AIDev/                                    # Java + Python 混合项目（macOS�
 | MeiliSearchService | Meilisearch⑧ BM25⑨ 全文检索 | 7700 | Meilisearch HTTP API |
 | FileParser | docx/xlsx 文件文本提取 | — | Apache POI |
 | ingest.py | 文件分块⑪、embedding③、双路写入 | — | Ollama⑫ Python SDK |
-| TradingAnalysisService | 个股交易分析编排 | — | LangChain4j② |
-| MarketDataService | 读取 batch_collect 采集的全市场数据 | — | Jackson |
-| MarketAnalysisService | 大盘分析编排（数据→DS V4→盘面研判） | — | LangChain4j② |
-| StockDataService | 个股数据获取（通过 ProcessBuilder 调用 Python） | — | ProcessBuilder + Jackson |
-| EtfDataService | ETF 数据获取（行情/净值㉚/溢价率㉛），通过 yfinance_data.py etf-full | — | ProcessBuilder + Jackson |
-| EtfAnalysisService | ETF 交易分析编排（数据→DS V4→分析报告） | — | LangChain4j② |
 | AgentService | ReAct㉓ 编排 + 确认回调㉕ | — | DeepSeek API㉔ |
 | ReActEngine | ReAct㉓ 循环 + autoMatchTool + 确认点创建 | — | DeepSeek API |
 | ToolRegistry | @Tool 注解扫描、JSON Schema 生成、反射调用 | — | Spring Bean |
@@ -319,7 +268,7 @@ LangChain4jLlmService
 ```
 
 - 模型：`deepseek-v4-flash`
-- 所有消费者（聊天、Agent、交易分析、大盘分析）共用此单一 LLM 服务
+- 所有消费者（聊天、Agent、知识库问答）共用此单一 LLM 服务
 
 ### 3.4 ~ 3.12 （Agent 引擎、向量检索、文档摄入等组件保持不变，详见原文档）
 
@@ -340,166 +289,8 @@ LangChain4jLlmService
 | POST | `/api/knowledge/sync/meilisearch` | Qdrant⑤ → Meilisearch⑧ 全量同步 |
 | POST | `/api/agent/chat` | Agent㉒ 对话入口 |
 | POST | `/api/agent/confirm` | Agent 确认回调㉕ |
-| POST | `/api/trading/analyze` | **个股交易分析**：输入 `symbol` + 可选 `request`，返回报价 + 技术指标 + DS V4 Flash 分析 |
-| POST | `/api/trading/batch` | 批量分析多个股票 |
-| GET | `/api/trading/quote/{symbol}` | 查询实时报价 |
-| GET | `/api/trading/indicators/{symbol}` | 查询技术指标（不调 LLM） |
-| GET | `/api/trading/search?q=` | 搜索股票（代码或名称），返回匹配列表 |
-| POST | `/api/trading/market-analysis` | **大盘分析**：基于每日全量数据，DS V4 Flash 输出盘面情绪、关注板块、个股 |
-| POST | `/api/etf/analyze` | **ETF 交易分析**：输入 ETF 代码 + 可选 request，返回行情+净值+溢价率㉛+DS V4 分析 |
-| POST | `/api/etf/batch` | 批量分析多个 ETF |
-| GET | `/api/etf/quote/{symbol}` | 查询 ETF 实时报价（含净值、溢价率） |
-| GET | `/api/etf/indicators/{symbol}` | 查询 ETF 技术指标（不调 LLM） |
-| GET | `/api/etf/search?q=` | 搜索 ETF（代码或名称） |
-| GET | `/api/etf/stats` | 获取今日 ETF 市场统计（需先运行 batch_collect.py） |
 
 ---
-
-## 五、交易分析系统
-
-### 5.1 个股分析流程
-
-```
-POST /api/trading/analyze { symbol: "600519" }
-        │
-        ▼
-┌─ TradingAnalysisService ──────────────────────────────────┐
-│                                                           │
-│ ① StockDataService（Python ProcessBuilder）                │
-│    ├── 实时行情  ← Sina Finance㉖ / 东方财富 / yfinance      │
-│    ├── 历史 K 线 ← 东方财富 / Sina                           │
-│    ├── 技术指标  ← 本地计算（MA/RSI/MACD/波动率/支撑阻力）    │
-│    └── 基本面    ← 东财数据中心（F10 财报，仅A股）            │
-│                                                           │
-│ ② MarketDataService（大盘背景注入）                        │
-│    ├── 大盘指数（7 个）                                     │
-│    ├── 全市场涨跌比、涨停跌停统计                              │
-│    ├── 个股所属行业板块表现                                    │
-│    ├── 个股 vs 板块相对强度                                    │
-│    └── 个股是否在今日 TOP 榜单中                               │
-│                                                           │
-│ ③ 构建结构化提示词 → 调用 DeepSeek V4 Flash                │
-│    └── 输出: 大盘背景→趋势研判→技术位→交易建议→基本面→风险    │
-│                                                           │
-│ ④ 返回 JSON（报价 + 指标 + 大盘上下文 + LLM 分析报告）      │
-│                                                           │
-└───────────────────────────────────────────────────────────┘
-```
-
-### 5.2 大盘分析流程
-
-```
-POST /api/trading/market-analysis
-        │
-        ▼
-┌─ MarketAnalysisService ───────────────────────────────────┐
-│                                                           │
-│ ① 读取当日全市场数据（training.json）                      │
-│    ├── 7 大指数                                            │
-│    ├── 涨跌家数、涨跌比、涨停跌停、涨跌分布                     │
-│    ├── 行业板块排行（109 个板块，涨幅前20 + 跌幅前20）         │
-│    └── TOP 个股榜单（涨幅/跌幅/成交额各 TOP10）               │
-│                                                           │
-│ ② 构建结构化 Prompt → 调用 DeepSeek V4 Flash              │
-│    └── 输出: 盘面综述→板块关注→个股关注→后市研判             │
-│                                                           │
-│ ③ 返回 JSON（指数+统计数据+TOP榜单+LLM分析报告）            │
-│                                                           │
-└───────────────────────────────────────────────────────────┘
-```
-
-### 5.3 ETF 分析流程
-
-```
-POST /api/etf/analyze { symbol: "510050" }
-        │
-        ▼
-┌─ EtfAnalysisService ─────────────────────────────────────┐
-│                                                           │
-│ ① EtfDataService（Python yfinance_data.py etf-full）      │
-│    ├── 实时行情  ← Sina / 东方财富                        │
-│    ├── 历史 K 线 ← 东方财富 / Sina                         │
-│    ├── 基金净值  ← 东方财富基金估值接口 (NAV) ㉚            │
-│    ├── 溢价率㉛   ← 本地计算 (市价 - NAV) / NAV            │
-│    ├── 技术指标  ← 本地计算 (MA/RSI/MACD/波动率)            │
-│    └── 跟踪指数  ← ETF 跟踪的指数信息                       │
-│                                                           │
-│ ② MarketDataService（大盘背景注入）                        │
-│    ├── 大盘指数（7 个）                                    │
-│    └── 全市场涨跌统计                                      │
-│                                                           │
-│ ③ 构建 ETF 专家提示词 → 调用 DeepSeek V4 Flash            │
-│    └── 输出: 净值分析→溢价率㉛判断→趋势研判→套利建议→风险   │
-│                                                           │
-│ ④ 返回 JSON（行情 + NAV + 溢价率 + 大盘背景 + LLM 分析）  │
-│                                                           │
-└───────────────────────────────────────────────────────────┘
-```
-
-**与个股分析的区别**：
-1. 提示词包含 ETF 特有的净值/溢价率/跟踪误差分析
-2. 分析维度侧重折溢价套利、流动性、跟踪偏差
-3. 无基本面分析（ETF 无 EPS/BPS），替代为跟踪指数和基金规模
-
-### 5.4 数据采集（batch_collect.py）
-
-每个交易日 15:30 定时执行。支持命令行选项：
-- `python3 batch_collect.py` — 全量采集（含个股 + ETF）
-- `python3 batch_collect.py --no-etf` — 仅采集股票
-- `python3 batch_collect.py --status` — 查看采集状态
-- `python3 batch_collect.py --update-list` — 刷新股票+ETF清单
-
-#### 个股 + 指数采集
-
-| 步骤 | 耗时 | 数据量 |
-|------|------|--------|
-| ① 加载股票清单（缓存） | ~0s | ~5488 只 |
-| ② 获取大盘指数（7个） | ~1s | 上证/深证/创业/科创/300/50/500 |
-| ③ 行业映射（F10 并发 50 线程） | ~10s | ~5300 只含行业 (覆盖率 97%+) |
-| ④ 全市场个股快照（Sina 批量 7批） | ~8s | ~5300 只 OHLC + 成交量 |
-| ⑤ 涨跌统计 + 板块聚合 | ~1s | 涨跌分布 + 109 个板块排行 |
-| ⑥ 存储（gzip + JSON） | ~0.3s | ~170KB/天 |
-| **个股小计** | **~20s** | |
-
-#### ETF 采集（--no-etf 时跳过）
-
-| 步骤 | 耗时 | 数据量 |
-|------|------|--------|
-| ① 发现 ETF 代码（首次 / 30天刷新） | ~20s | ~1000 只 |
-| ② ETF 批量快照（Sina 2批） | ~2s | ~1000 只 OHLC + 成交量 |
-| ③ 基金净值获取（东方财富） | ~3s | 逐只获取 NAV ㉚ |
-| ④ 溢价率计算 ㉛ | ~0.1s | 市价 vs NAV 偏离度 |
-| ⑤ ETF 统计聚合 | ~0.2s | 净值排行 + 溢价率排行 + TOP ETF |
-| ⑥ 存储（gzip + JSON） | ~0.1s | ~30KB/天 |
-| **ETF 小计** | **~25s（首次）/ ~5s（缓存）** | |
-
-#### K 线采集
-
-每日采集所有个股和 ETF 的历史 K 线数据，存储于 `market_data/kline/`：
-
-| 项目 | 说明 |
-|------|------|
-| 覆盖范围 | 6451 只个股 + ETF |
-| 时间跨度 | 每个标的 250 个交易日 |
-| 数据源 | 东方财富优先（K线API）→ Sina 降级 |
-| 数据字段 | 日期、开盘、最高、最低、收盘、成交量、成交额 |
-| 存储格式 | 每只股票一个 JSON 文件 |
-| 存储大小 | ~2MB/天（全部 6451 只） |
-| 首次采集 | ~60 秒（东方财富，带速率限制） |
-| 后续增量 | 仅更新新数据，~5 秒 |
-
-行业映射通过**东方财富 F10 公司概况接口**并发获取（50 线程 ThreadPoolExecutor），首次运行约 10 秒完成 5400 只股票的行业分类，后续运行只补充新股票。
-
-### 5.4 前端页面
-
-| 页面 | 路由 | 功能 |
-|------|------|------|
-| 📈 交易分析 | `/trading` | 输入股票代码/名称搜索，查看实时报价 + 技术指标 + LLM 分析报告 |
-| 📊 大盘分析 | `/market` | 点击分析今日大盘，展示指数、统计、TOP 榜单、LLM 盘面研判 |
-| 📈 ETF 分析 | `/etf` | ETF 实时报价 + 净值㉚ + 溢价率㉛ + LLM 分析报告 |
-| 其他 | /chat, /agent, /knowledge-qa, ... | 通用聊天、Agent、知识库等功能 |
-
-前端使用 Vue 3 + TypeScript + Vite，通过 `/api` 代理到 Java 后端 (localhost:8081)。分析结果通过 `localStorage` 持久化，页面刷新/切换不丢失。
 
 ---
 
@@ -579,15 +370,7 @@ store:
 | **Agent㉒ 模式** | **ReAct㉓ 循环 + HITL㉕ 双重确认** | **自动规划 + 人工兜底** |
 | **路由架构** | **三层路由：DomainRouter → ToolRetriever → CapabilityGuard** | **逐层过滤工具空间** |
 | **LLM 调用框架** | **LangChain4j 0.33.x OpenAiChatModel** | **原生 tool calling、streaming** |
-| **交易分析 LLM** | **DeepSeek V4 Flash（统一 LLM 架构）** | **删除本地 Qwen2.5，简化架构。数据拉取 + API 推理，不存训练数据** |
-| **大盘分析** | **MarketDataService 读取 batch_collect 数据 → MarketAnalysisService 调用 DS V4 Flash** | **复用全市场采集数据，LLM 自主研判** |
-| **ETF 分析** | **EtfDataService 调 yfinance_data.py etf-full → EtfAnalysisService 调用 DS V4 Flash** | **独立于个股分析的专用流程，聚焦净值㉚、溢价率㉛、跟踪误差** |
-| ETF 数据源 | Sina（批量行情）+ 东方财富（基金净值）+ 同花顺（ETF 清单） | 行情用 Sina 批量，净值逐只查询东财 |
-| K 线数据源 | 东方财富 K 线 API（优先）→ Sina K 线（降级） | 日 K 线 250 个交易日，东方财富数据更完整 |
-| K 线存储 | 逐只股票 JSON 文件存入 `market_data/kline/` | 按代码独立文件，便于 Java 按需读取 |
-| 金融数据源 | Sina Finance ㉖（批量不限流）+ 东方财富 ㉗（F10 并发 50 线程） | 批量用新浪，行业映射用东财 F10 并发 |
-| 数据采集 | ProcessBuilder 调 Python 脚本 | Java 编排流程、Python 执行数据获取 |
-| 股票搜索 | 本地 stocks_list.json + 30 只常用美股硬编码 | A 股按代码/名称模糊匹配，美股覆盖主流 |
+| 数据采集 | Python 脚本（ProcessBuilder 调用） | Java 编排流程、Python 执行 |
 
 ---
 
@@ -600,10 +383,3 @@ store:
 | Redis 连接断开 | ConversationStore / ConfirmationStore 自动切换 LocalCache |
 | DeepSeek API 网络错误 | RestTemplate⑰ 5s 连接超时，重试 1 次 |
 | DeepSeek API 限流 (429) | 等待 2s 后重试，最多 2 次 |
-| Python 子进程失败 | StockDataService 返回 `error` 字段，TradingAnalysisService 静默降级 |
-| 股票数据获取失败 | 返回 `llmError`/`error` 字段，前端展示降级提示 |
-| 行业映射获取失败 | 增量补充，逐次累计，非致命 |
-| ETF 净值获取失败 | 返回行情数据 + `navError` 字段，LLM 分析跳过净值/溢价率维度 |
-| ETF 批量采集跳过 | 支持 `--no-etf` 参数，个股采集不受影响 |
-| K 线获取失败（东方财富） | 自动降级到 Sina K 线接口，数据完整度降低但不断服 |
-| K 线数据不存在（新上市股票） | Java 端读取时自动跳过，TradingAnalysisService 静默降级 |
